@@ -25,14 +25,19 @@
             box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
             text-align: center;
             white-space: nowrap;
+            overflow: hidden;
+            max-width: 0;
             opacity: 0;
-            transition: opacity 0.3s ease;
-            display: none;
+            transition: max-width 0.8s cubic-bezier(0.45, 0, 0.25, 1), opacity 0.8s ease 0.1s;
         }
+
+
         .box.show {
+            max-width: 600px;
             opacity: 1;
-            display: flex;
+            transition: max-width 0.8s cubic-bezier(0.45, 0, 0.25, 1), opacity 0.8s ease;
         }
+
         #timer-box {
             display: flex;
             align-items: center;
@@ -186,15 +191,16 @@
     }
 
     function updateVisibility(running) {
-        if (running && !isVisible) {
-            timerBox.classList.add("show");
-            eventBox.classList.add("show");
-            heatBox.classList.add("show");
+        const boxes = [timerBox, eventBox, heatBox];
+        if (running && !isVisible) {   
+            boxes.forEach(box => {
+                box.classList.add('show');   
+            }); 
             isVisible = true;
         } else if (!running && isVisible) {
-            timerBox.classList.remove("show");
-            eventBox.classList.remove("show");
-            heatBox.classList.remove("show");
+            boxes.forEach(box => {      
+                box.classList.remove('show')  
+            }); 
             isVisible = false;
         }
     }
@@ -244,4 +250,5 @@
 </script>
 
 </body>
+
 </html>
