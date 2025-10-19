@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lane Starts</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: transparent;
+            display: flex;
+			flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+			font-family: Helvetica, serif;
+			overflow: hidden;
+			perspective: 2000px;
+        }
+		
+		@keyframes expandLaneNumber {
+			from {
+				transform: scale(0);
+				opacity: 0;
+			}
+			to {
+				transform: scale(1);
+				opacity: 0.9;
+			}
+		}
+
+		@keyframes fadeInFromLeft {
+			from {
+				opacity: 0;
+				clip-path: inset(0 100% 0 0);
+			}
+			to {
+				opacity: 0.9;
+				clip-path: inset(0 0 0 0);
+			}
+		}
+		
+		@keyframes fadeOut {
+			from {
+				opacity: 0.9;
+			}
+			to {
+				opacity: 0;
+			}
+		}
+
+		#laneWrapper {
+			transform-style: preserve-3d;
+			transition: transform 0.2s ease;
+		}
+
+        .container {
+            display: flex;
+            gap: 8px;
+			opacity: 0;
+			transition: margin 0.2s ease;
+        }
+
+        .box {
+            height: 112px;
+            background-color: #42008f;
+			opacity: 0.9;
+			display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: relative;
+        }
+
+        .LaneNumber {
+            width: 88px;
+			justify-content: center; 
+			animation: expandLaneNumber 1s ease forwards;
+			transform-origin: center;
+			opacity: 0;
+        }
+
+        .SwimmerInfo {
+            width: 762px;
+			display: flex;
+            justify-content: space-between;
+            align-items: center;
+			animation: fadeInFromLeft 1s ease forwards;
+			opacity: 0;
+        }
+		
+		.LaneNumber .content {
+            font-size: 96px;
+			font-weight: bold;
+            color: #FFFF00;
+            opacity: 0.95;
+        }
+		
+		.SwimmerInfo .name {
+            font-size: 52px;
+            font-weight: bold;
+            color: #FFFFFF;
+            opacity: 0.95;
+			margin-left: 16px;
+			white-space: nowrap
+        }
+
+        .SwimmerInfo .club {
+			font-size: 36px;
+			font-weight: normal;
+			color: #FFFFFF;
+			text-transform: uppercase;
+			white-space: nowrap;
+			overflow: hidden;
+			text-align: right;
+			padding-right: 16px;
+			display: block;
+			width: calc(100% - 16px);
+			box-sizing: border-box;
+			transform-origin: right center;
+		}
+		
+		.fade-out {
+			animation: fadeOut 1s ease forwards;
+		}
+
+		/* Control panel */
+		.control-panel {
+			position: fixed;
+			top: 50%;
+			right: 30px;
+			transform: translateY(-50%);
+			background: rgba(0, 0, 0, 0.95);
+			padding: 30px;
+			border-radius: 12px;
+			color: white;
+			font-family: Arial, sans-serif;
+			font-size: 16px;
+			z-index: 10000;
+			width: 400px;
+			max-height: 95vh;
+			overflow-y: auto;
+			box-shadow: 0 8px 32px rgba(0,0,0,0.8);
+			border: 2px solid #4CAF50;
+			display: none;
+		}
+
+		.control-panel.visible {
+			display: block;
+		}
+
+		.control-panel h2 {
+			margin: 0 0 20px 0;
+			font-size: 28px;
+			color: #4CAF50;
+			text-align: center;
+			border-bottom: 3px solid #4CAF50;
+			padding-bottom: 15px;
+		}
+
+		.control-section {
+			background: rgba(255,255,255,0.05);
+			padding: 20px;
+			border-radius: 8px;
+			margin-bottom: 20px;
+			border: 1px solid rgba(76, 175, 80, 0.3);
+		}
+
+		.control-section h3 {
+			margin: 0 0 15px 0;
+			font-size: 20px;
+			color: #4CAF50;
+		}
+
+		.control-group {
+			margin-bottom: 20px;
+		}
+
+		.control-group label {
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			margin-bottom: 10px;
+			font-size: 16px;
+			color: #ddd;
+			font-weight: bold;
+		}
+
+		.control-group input[type="range"] {
+			width: 100%;
+			height: 8px;
+			margin-top: 5px;
+		}
+
+		.value-display {
+			color: #4CAF50;
+			font-weight: bold;
+			font-size: 18px;
+			min-width: 80px;
+			text-align: right;
+		}
+
+		.button-group {
+			display: flex;
+			gap: 12px;
+			margin-top: 20px;
+		}
+
+		.button-group button {
+			flex: 1;
+			padding: 15px;
+			background: #4CAF50;
+			border: none;
+			border-radius: 6px;
+			color: white;
+			cursor: pointer;
+			font-size: 16px;
+			font-weight: bold;
+			transition: all 0.2s;
+		}
+
+		.button-group button:hover {
+			background: #45a049;
+			transform: translateY(-2px);
+			box-shadow: 0 4px 8px rgba(76, 175, 80, 0.4);
+		}
+
+		.button-group button.secondary {
+			background: #666;
+		}
+
+		.button-group button.secondary:hover {
+			background: #555;
+		}
+
+		.instructions {
+			background: rgba(76, 175, 80, 0.15);
+			border: 2px solid #4CAF50;
+			padding: 15px;
+			border-radius: 8px;
+			font-size: 14px;
+			line-height: 1.8;
+			color: #ccc;
+			margin-bottom: 20px;
+		}
+
+		.instructions strong {
+			color: #4CAF50;
+			display: block;
+			margin-bottom: 8px;
+			font-size: 16px;
+		}
+
+		/* Output modal */
+		.output-modal {
+			display: none;
+		}
+    </style>
+</head>
+<body>
+	<div id="laneWrapper">
+		<div class="container" id="lane1">
+			<div class="box LaneNumber">
+				<div class="content">1</div>
+			</div>
+			<div class="box SwimmerInfo">
+				<div class="name">Ethan Bland</div>
+				<div class="club">CARN</div>
+			</div>
+		</div>
+		<div class="container" id="lane2">
+			<div class="box LaneNumber">
+				<div class="content">2</div>
+			</div>
+			<div class="box SwimmerInfo">
+				<div class="name">Ashton Pinington</div>
+				<div class="club">CARN</div>
+			</div>
+		</div>
+		<div class="container" id="lane3">
+			<div class="box LaneNumber">
+				<div class="content">3</div>
+			</div>
+			<div class="box SwimmerInfo">
+				<div class="name">Alex McHugh</div>
+				<div class="club">CARN</div>
+			</div>
+		</div>
+		<div class="container" id="lane4">
+			<div class="box LaneNumber">
+				<div class="content">4</div>
+			</div>
+			<div class="box SwimmerInfo">
+				<div class="name">Clara Spence</div>
+				<div class="club">CARN</div>
+			</div>
+		</div>
+		<div class="container" id="lane5">
+			<div class="box LaneNumber">
+				<div class="content">5</div>
+			</div>
+			<div class="box SwimmerInfo">
+				<div class="name">Samuel Sutcliff</div>
+				<div class="club">RAMS</div>
+			</div>
+		</div>
+		<div class="container" id="lane6">
+			<div class="box LaneNumber">
+				<div class="content">6</div>
+			</div>
+			<div class="box SwimmerInfo">
+				<div class="name">Nathan Huddleston</div>
+				<div class="club">LANC</div>
+			</div>
+		</div>
+		<div class="container" id="lane7">
+			<div class="box LaneNumber">
+				<div class="content">7</div>
+			</div>
+			<div class="box SwimmerInfo">
+				<div class="name">Luke Horton</div>
+				<div class="club">CARN</div>
+			</div>
+		</div>
+		<div class="container" id="lane8">
+			<div class="box LaneNumber">
+				<div class="content">8</div>
+			</div>
+			<div class="box SwimmerInfo">
+				<div class="name">Alex Mann</div>
+				<div class="club">LANC</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="control-panel" id="controlPanel">
+		<h2>🏊 Lane Alignment</h2>
+		
+		<div class="instructions">
+			<strong>How to Use:</strong>
+			Adjust the 3D rotation to match your camera angle, then fine-tune the spacing between each lane. All lanes move together perfectly!
+		</div>
+
+		<div class="control-section">
+			<h3>3D Rotation (All Lanes)</h3>
+			
+			<div class="control-group">
+				<label>
+					<span>Tilt (X-axis)</span>
+					<span class="value-display" id="rotateXValue">0°</span>
+				</label>
+				<input type="range" id="rotateX" min="-45" max="45" step="0.5" value="0">
+			</div>
+
+			<div class="control-group">
+				<label>
+					<span>Turn (Y-axis)</span>
+					<span class="value-display" id="rotateYValue">0°</span>
+				</label>
+				<input type="range" id="rotateY" min="-45" max="45" step="0.5" value="0">
+			</div>
+
+			<div class="control-group">
+				<label>
+					<span>Roll (Z-axis)</span>
+					<span class="value-display" id="rotateZValue">0°</span>
+				</label>
+				<input type="range" id="rotateZ" min="-15" max="15" step="0.1" value="0">
+			</div>
+
+			<div class="control-group">
+				<label>
+					<span>Overall Spacing</span>
+					<span class="value-display" id="baseGapValue">4px</span>
+				</label>
+				<input type="range" id="baseGap" min="-20" max="50" step="1" value="4">
+			</div>
+		</div>
+
+		<div class="button-group">
+			<button onclick="resetAll()" class="secondary">🔄 Reset All</button>
+		</div>
+
+		<div style="margin-top: 15px; padding: 15px; background: rgba(76, 175, 80, 0.2); border-radius: 8px; text-align: center; color: #4CAF50; font-size: 14px;">
+			✅ Settings auto-save as you adjust
+		</div>
+	</div>
+
+	<script>
+	// Club name scaling
+	document.addEventListener("DOMContentLoaded", () => {
+		const clubElements = document.querySelectorAll(".club");
+		const targetText = "LBORO UNI";
+		const measureElement = document.createElement("span");
+		measureElement.style.visibility = "hidden";
+		measureElement.style.position = "absolute";
+		measureElement.style.fontSize = "36px";
+		measureElement.style.fontWeight = "normal";
+		measureElement.style.whiteSpace = "nowrap";
+		measureElement.textContent = targetText;
+		document.body.appendChild(measureElement);
+
+		const targetWidth = measureElement.offsetWidth;
+		document.body.removeChild(measureElement);
+
+		clubElements.forEach(element => {
+			const textWidth = getTextWidth(element.textContent, getComputedStyle(element));
+			const scaleFactor = textWidth > targetWidth ? targetWidth / textWidth : 1;
+			element.style.transform = `scaleX(${scaleFactor})`;
+		});
+
+		function getTextWidth(text, style) {
+			const canvas = document.createElement("canvas");
+			const context = canvas.getContext("2d");
+			context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+			return context.measureText(text).width;
+		}
+	});
+	</script>
+	
+	<script>
+	// Name font size adjustment
+	document.addEventListener("DOMContentLoaded", () => {
+		const laneContainers = document.querySelectorAll(".container");
+
+		laneContainers.forEach(container => {
+			const swimmerNameElement = container.querySelector(".name");
+
+			if (!swimmerNameElement || swimmerNameElement.textContent.trim() === "") {
+				container.style.visibility = "hidden";
+			} else {
+				adjustFontSize(swimmerNameElement, 0.65);
+			}
+		});
+
+		function adjustFontSize(element, maxWidthPercentage) {
+			const parentWidth = element.parentElement.offsetWidth;
+			const maxWidth = parentWidth * maxWidthPercentage;
+
+			let fontSize = parseInt(window.getComputedStyle(element).fontSize, 10);
+
+			while (element.offsetWidth > maxWidth && fontSize > 1) {
+				fontSize -= 1;
+				element.style.fontSize = `${fontSize}px`;
+			}
+		}
+	});
+	</script>
+	
+	<script>
+	// Animation timing
+	document.addEventListener("DOMContentLoaded", () => {
+		const laneGroups = [
+			[4, 5],
+			[3, 6],
+			[2, 7],
+			[1, 8]  
+		];
+		const findGroupIndex = (number) => {
+			return laneGroups.findIndex(group => group.includes(number));
+		};
+		const laneContainers = document.querySelectorAll(".container");
+
+		laneContainers.forEach(container => {
+			const laneNumber = container.querySelector(".LaneNumber");
+			const swimmerInfo = container.querySelector(".SwimmerInfo");
+
+			setTimeout(() => {
+				container.style.opacity = 1;
+			}, 100);
+
+			const groupIndex = findGroupIndex(parseInt(container.querySelector(".LaneNumber .content").textContent.trim(), 10));
+			laneNumber.style.animationDelay = (groupIndex * 0.5).toString() + "s";
+			swimmerInfo.style.animationDelay = (groupIndex * 0.5 + 0.75).toString() + "s";
+		});
+	});
+	</script>
+	
+	<script>
+		// Settings object - EDIT THESE VALUES
+		const settings = {
+			rotateX: 0,
+			rotateY: 0,
+			rotateZ: 0,
+			baseGap: 4
+		};
+
+		let isInteracting = false;
+		let interactTimeout = null;
+
+		document.addEventListener("DOMContentLoaded", () => {
+			setupControls();
+			applySettings();
+			detectInteractMode();
+		});
+
+		// Detect OBS interact mode
+		function detectInteractMode() {
+			const panel = document.getElementById('controlPanel');
+
+			// Show on mouse movement
+			document.addEventListener('mousemove', () => {
+				if (!isInteracting) {
+					isInteracting = true;
+					panel.classList.add('visible');
+				}
+				
+				// Reset timeout
+				clearTimeout(interactTimeout);
+				interactTimeout = setTimeout(() => {
+					isInteracting = false;
+					panel.classList.remove('visible');
+				}, 3000);
+			});
+
+			// Show on click
+			document.addEventListener('click', () => {
+				isInteracting = true;
+				panel.classList.add('visible');
+				
+				clearTimeout(interactTimeout);
+				interactTimeout = setTimeout(() => {
+					isInteracting = false;
+					panel.classList.remove('visible');
+				}, 5000);
+			});
+		}
+
+		function setupControls() {
+			// 3D rotation controls
+			document.getElementById('rotateX').addEventListener('input', (e) => {
+				settings.rotateX = parseFloat(e.target.value);
+				document.getElementById('rotateXValue').textContent = e.target.value + '°';
+				applySettings();
+			});
+
+			document.getElementById('rotateY').addEventListener('input', (e) => {
+				settings.rotateY = parseFloat(e.target.value);
+				document.getElementById('rotateYValue').textContent = e.target.value + '°';
+				applySettings();
+			});
+
+			document.getElementById('rotateZ').addEventListener('input', (e) => {
+				settings.rotateZ = parseFloat(e.target.value);
+				document.getElementById('rotateZValue').textContent = e.target.value + '°';
+				applySettings();
+			});
+
+			document.getElementById('baseGap').addEventListener('input', (e) => {
+				settings.baseGap = parseFloat(e.target.value);
+				document.getElementById('baseGapValue').textContent = e.target.value + 'px';
+				applySettings();
+			});
+
+			// Load initial values
+			document.getElementById('rotateX').value = settings.rotateX;
+			document.getElementById('rotateY').value = settings.rotateY;
+			document.getElementById('rotateZ').value = settings.rotateZ;
+			document.getElementById('baseGap').value = settings.baseGap;
+		}
+
+		function applySettings() {
+			const wrapper = document.getElementById('laneWrapper');
+			
+			// Apply 3D rotation to entire wrapper
+			wrapper.style.transform = `
+				rotateX(${settings.rotateX}deg)
+				rotateY(${settings.rotateY}deg)
+				rotateZ(${settings.rotateZ}deg)
+			`;
+
+			// Apply uniform gaps to each lane
+			const lanes = document.querySelectorAll('.container');
+			lanes.forEach((lane, index) => {
+				if (index === 0) {
+					lane.style.marginTop = '0';
+				} else {
+					lane.style.marginTop = settings.baseGap + 'px';
+				}
+			});
+		}
+
+		function resetAll() {
+			settings.rotateX = 0;
+			settings.rotateY = 0;
+			settings.rotateZ = 0;
+			settings.baseGap = 4;
+			
+			setupControls();
+			applySettings();
+		}
+	</script>
+	
+	<script>
+		const wsUrl = "ws://localhost:8001";
+		let timerStartDetected = false;
+
+		function connectWebSocket() {
+			const ws = new WebSocket(wsUrl);
+
+			ws.onmessage = (event) => {
+				const data = JSON.parse(event.data);
+
+				if (data.timerSync && data.timerSync.running && !timerStartDetected) {
+					timerStartDetected = true;
+					triggerFadeOut();
+				}
+
+				if (data.lanes) {
+					timerStartDetected = false;
+
+					Object.keys(data.lanes).forEach(laneNum => {
+						const lane = data.lanes[laneNum];
+						const container = document.getElementById(`lane${laneNum}`);
+						if (container) {
+							const nameEl = container.querySelector(".name");
+							const clubEl = container.querySelector(".club");
+
+							nameEl.textContent = lane.name || "";
+							clubEl.textContent = lane.club || "";
+
+							if (!lane.name && !lane.club) {
+								container.style.visibility = "hidden";
+							} else {
+								container.style.visibility = "visible";
+							}
+						}
+					});
+				}
+			};
+
+			ws.onclose = () => {
+				setTimeout(connectWebSocket, 1000);
+			};
+		}
+
+		function triggerFadeOut() {
+			const laneContainers = document.querySelectorAll(".container");
+			laneContainers.forEach(container => {
+				container.classList.add("fade-out");
+				container.addEventListener("animationend", () => {
+					container.style.display = "none";
+				}, { once: true });
+			});
+		}
+
+		window.addEventListener("load", connectWebSocket);
+	</script>
+</body>
+</html>
