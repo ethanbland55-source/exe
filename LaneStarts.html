@@ -264,8 +264,8 @@
 				<div class="content">1</div>
 			</div>
 			<div class="box SwimmerInfo">
-				<div class="name">Ethan Bland</div>
-				<div class="club">CARN</div>
+				<div class="name"></div>
+				<div class="club"></div>
 			</div>
 		</div>
 		<div class="container" id="lane2">
@@ -273,8 +273,8 @@
 				<div class="content">2</div>
 			</div>
 			<div class="box SwimmerInfo">
-				<div class="name">Ashton Pinington</div>
-				<div class="club">CARN</div>
+				<div class="name"></div>
+				<div class="club"></div>
 			</div>
 		</div>
 		<div class="container" id="lane3">
@@ -282,8 +282,8 @@
 				<div class="content">3</div>
 			</div>
 			<div class="box SwimmerInfo">
-				<div class="name">Alex McHugh</div>
-				<div class="club">CARN</div>
+				<div class="name"></div>
+				<div class="club"></div>
 			</div>
 		</div>
 		<div class="container" id="lane4">
@@ -291,8 +291,8 @@
 				<div class="content">4</div>
 			</div>
 			<div class="box SwimmerInfo">
-				<div class="name">Clara Spence</div>
-				<div class="club">CARN</div>
+				<div class="name"></div>
+				<div class="club"></div>
 			</div>
 		</div>
 		<div class="container" id="lane5">
@@ -300,8 +300,8 @@
 				<div class="content">5</div>
 			</div>
 			<div class="box SwimmerInfo">
-				<div class="name">Samuel Sutcliff</div>
-				<div class="club">RAMS</div>
+				<div class="name"></div>
+				<div class="club"></div>
 			</div>
 		</div>
 		<div class="container" id="lane6">
@@ -309,8 +309,8 @@
 				<div class="content">6</div>
 			</div>
 			<div class="box SwimmerInfo">
-				<div class="name">Nathan Huddleston</div>
-				<div class="club">LANC</div>
+				<div class="name"></div>
+				<div class="club"></div>
 			</div>
 		</div>
 		<div class="container" id="lane7">
@@ -318,8 +318,8 @@
 				<div class="content">7</div>
 			</div>
 			<div class="box SwimmerInfo">
-				<div class="name">Luke Horton</div>
-				<div class="club">CARN</div>
+				<div class="name"></div>
+				<div class="club"></div>
 			</div>
 		</div>
 		<div class="container" id="lane8">
@@ -327,14 +327,14 @@
 				<div class="content">8</div>
 			</div>
 			<div class="box SwimmerInfo">
-				<div class="name">Alex Mann</div>
-				<div class="club">LANC</div>
+				<div class="name"></div>
+				<div class="club"></div>
 			</div>
 		</div>
 	</div>
 
 	<div class="control-panel" id="controlPanel">
-		<h2>🏊 Lane Alignment</h2>
+		<h2>Lane Alignment</h2>
 		
 		<div class="instructions">
 			<strong>How to Use:</strong>
@@ -378,11 +378,11 @@
 		</div>
 
 		<div class="button-group">
-			<button onclick="resetAll()" class="secondary">🔄 Reset All</button>
+			<button onclick="resetAll()" class="secondary">Reset All</button>
 		</div>
 
 		<div style="margin-top: 15px; padding: 15px; background: rgba(76, 175, 80, 0.2); border-radius: 8px; text-align: center; color: #4CAF50; font-size: 14px;">
-			✅ Settings auto-save as you adjust
+			Settings auto-save as you adjust
 		</div>
 	</div>
 
@@ -608,30 +608,95 @@
 
 				if (data.lanes) {
 					timerStartDetected = false;
+					
+					// Hide all lanes first, then refresh with animation
+					hideAllLanes();
+					
+					// Wait a bit for hide to complete, then show with animation
+					setTimeout(() => {
+						refreshLanesWithAnimation();
+						
+						Object.keys(data.lanes).forEach(laneNum => {
+							const lane = data.lanes[laneNum];
+							const container = document.getElementById(`lane${laneNum}`);
+							if (container) {
+								const nameEl = container.querySelector(".name");
+								const clubEl = container.querySelector(".club");
 
-					Object.keys(data.lanes).forEach(laneNum => {
-						const lane = data.lanes[laneNum];
-						const container = document.getElementById(`lane${laneNum}`);
-						if (container) {
-							const nameEl = container.querySelector(".name");
-							const clubEl = container.querySelector(".club");
+								nameEl.textContent = lane.name || "";
+								clubEl.textContent = lane.club || "";
 
-							nameEl.textContent = lane.name || "";
-							clubEl.textContent = lane.club || "";
-
-							if (!lane.name && !lane.club) {
-								container.style.visibility = "hidden";
-							} else {
-								container.style.visibility = "visible";
+								if (!lane.name && !lane.club) {
+									container.style.visibility = "hidden";
+								} else {
+									container.style.visibility = "visible";
+								}
 							}
-						}
-					});
+						});
+					}, 100);
 				}
 			};
 
 			ws.onclose = () => {
 				setTimeout(connectWebSocket, 1000);
 			};
+		}
+
+		function hideAllLanes() {
+			// Instantly hide all lanes
+			const laneContainers = document.querySelectorAll(".container");
+			laneContainers.forEach(container => {
+				container.style.opacity = "0";
+				container.style.display = "none";
+				
+				// Reset animations
+				const laneNumber = container.querySelector(".LaneNumber");
+				const swimmerInfo = container.querySelector(".SwimmerInfo");
+				laneNumber.style.animation = "none";
+				swimmerInfo.style.animation = "none";
+			});
+		}
+
+		function refreshLanesWithAnimation() {
+			// Show lanes with animation groups
+			const laneGroups = [
+				[4, 5],
+				[3, 6],
+				[2, 7],
+				[1, 8]  
+			];
+			
+			const findGroupIndex = (number) => {
+				return laneGroups.findIndex(group => group.includes(number));
+			};
+			
+			const laneContainers = document.querySelectorAll(".container");
+			laneContainers.forEach(container => {
+				const laneNumber = container.querySelector(".LaneNumber");
+				const swimmerInfo = container.querySelector(".SwimmerInfo");
+				
+				// Remove fade-out class and reset
+				container.classList.remove("fade-out");
+				container.style.display = "flex";
+				
+				// Trigger reflow to restart animations
+				void container.offsetWidth;
+				
+				// Re-apply animations with delays
+				const laneNum = parseInt(container.querySelector(".LaneNumber .content").textContent.trim(), 10);
+				const groupIndex = findGroupIndex(laneNum);
+				
+				laneNumber.style.animation = "expandLaneNumber 1s ease forwards";
+				laneNumber.style.animationDelay = (groupIndex * 0.5).toString() + "s";
+				
+				swimmerInfo.style.animation = "fadeInFromLeft 1s ease forwards";
+				swimmerInfo.style.animationDelay = (groupIndex * 0.5 + 0.75).toString() + "s";
+				
+				// Show container with delay
+				setTimeout(() => {
+					container.style.opacity = 1;
+				}, 100);
+			});
 		}
 
 		function triggerFadeOut() {
