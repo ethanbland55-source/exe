@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transparent Background with Boxes</title>
+    <style>
+        /* Ensure the page background is fully transparent */
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: transparent;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: Helvetica, serif; /* Change font */
+        }
+
+        .container {
+            display: flex;
+            flex-direction: column; /* Arrange items vertically */
+        }
+
+        .row {
+            display: flex;
+        }
+
+        .row:first-child + .row {
+            margin-top: 8px; /* Add gap between the first and second rows */
+        }
+
+        .box {
+            height: 40px; /* Default height */
+            background-color: #42008f; /* Default color */
+            display: flex;
+            align-items: center;
+            position: relative;
+        }
+
+        .LaneNumber {
+            width: 28px; /* Default width */
+            display: flex;
+            justify-content: center;
+        }
+
+        .SwimmerInfo {
+            width: 300px; /* Default width */
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .LaneNumber .content {
+            font-size: 28px; /* Default font size */
+            color: #FFFF00; /* Default color */
+        }
+
+        .SwimmerInfo .name {
+            font-size: 24px; /* Adjust font size to fit the box */
+            text-transform: uppercase;
+            color: #FFFFFF; /* White color */
+            margin-left: 8px; /* Add padding before swimmer name */
+            white-space: nowrap;
+        }
+
+        .SwimmerInfo .splitTime {
+            font-size: 24px; /* Base font size */
+            font-weight: normal;
+            color: #FFFF00; /* Yellow text */
+            white-space: nowrap; /* Prevent wrapping */
+            overflow: hidden; /* Hide overflow */
+            text-align: right; /* Right-align text */
+            padding-right: 8px; /* Keep consistent padding */
+            display: block; /* Block for consistent width */
+            width: calc(100% - 16px); /* Ensures container width minus padding */
+            box-sizing: border-box; /* Include padding in width calculation */
+            transform-origin: right center; /* Scale text from the right */
+        }
+		
+		
+		/* Animation for container fade out - faster */
+		@keyframes fadeOut {
+			from {
+				opacity: 0.92;
+			}
+			to {
+				opacity: 0;
+			}
+		}
+
+		/* Animation for rows appearing - smooth float from right */
+		@keyframes zoomInFromRight {
+			0% {
+				opacity: 0;
+				transform: translateX(250px);
+			}
+			100% {
+				opacity: 0.92;
+				transform: translateX(0);
+			}
+		}
+
+		.row {
+			transform: translateX(0);
+		}
+
+		.row.zoom-in {
+			animation: zoomInFromRight 0.6s ease-in-out forwards;
+		}
+
+    </style>
+    <script>
+		document.addEventListener("DOMContentLoaded", () => {
+			const rows = document.querySelectorAll(".row");
+
+			rows.forEach(row => {
+				const splitTime = row.querySelector(".splitTime").textContent.trim();
+				if (!splitTime) {
+					row.style.visibility = 'hidden'; // Hide instead of remove
+				}
+			});
+		});
+	</script>
+	<script>
+	document.addEventListener("DOMContentLoaded", () => {
+		const nameElements = document.querySelectorAll(".name");
+
+		nameElements.forEach(nameElement => {
+			adjustFontSize(nameElement, 0.60);
+		});
+
+		function adjustFontSize(element, maxWidthPercentage) {
+			const parentWidth = element.parentElement.offsetWidth;
+			const maxWidth = parentWidth * maxWidthPercentage;
+
+			let fontSize = parseInt(window.getComputedStyle(element).fontSize, 10);
+
+			while (element.offsetWidth > maxWidth && fontSize > 1) {
+				fontSize -= 1;
+				element.style.fontSize = `${fontSize}px`;
+			}
+		}
+	});
+	</script>
+	<!-- 1. Font size adjustment function -->
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+    const nameElements = document.querySelectorAll(".name");
+
+    nameElements.forEach(nameElement => {
+        adjustFontSize(nameElement, 0.60);
+    });
+});
+
+function adjustFontSize(element, maxWidthPercentage) {
+    const parentWidth = element.parentElement.offsetWidth;
+    const maxWidth = parentWidth * maxWidthPercentage;
+
+    let fontSize = parseInt(window.getComputedStyle(element).fontSize, 10);
+
+    while (element.offsetWidth > maxWidth && fontSize > 1) {
+        fontSize -= 1;
+        element.style.fontSize = `${fontSize}px`;
+    }
+}
+</script>
+
+<!-- 2. Hide empty rows on load -->
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+    const rows = document.querySelectorAll(".row");
+
+    rows.forEach(row => {
+        const splitTime = row.querySelector(".splitTime").textContent.trim();
+        if (!splitTime) {
+            row.style.visibility = 'hidden';
+        }
+    });
+});
+</script>
+
+<!-- 3. All helper functions BEFORE WebSocket -->
+<script>
+// Format time function
+function formatTime(time) {
+    return time.replace(/^0+:?0*/, '') || '0.00';
+}
+
+// Update split time display
+function updateSplitTime(data) {
+    const place = data.finishTime.place;
+    const lane = data.finishTime.lane;
+    const fullName = data.finishTime.swimmer;
+    const time = data.finishTime.time;
+    
+    
+    
+    // Show the container when we have splits to display
+    const container = document.querySelector('.container');
+    container.style.visibility = 'visible';
+    container.style.opacity = '0.92';
+    container.classList.remove('fade-out');
+    
+    // Format name as E.BLAND (first initial + . + last name)
+    const nameParts = fullName.trim().split(' ');
+    let formattedName = '';
+    if (nameParts.length >= 2) {
+        const firstName = nameParts[0];
+        const lastName = nameParts.slice(1).join(' ');
+        formattedName = `${firstName.charAt(0)}.${lastName}`.toUpperCase();
+    } else {
+        formattedName = fullName.toUpperCase();
+    }
+    
+    // Find the row by place (id)
+    const row = document.getElementById(place);
+    
+    if (row) {
+        
+		// Set initial transform state BEFORE making visible
+        row.style.opacity = '0';
+        row.style.transform = 'translateX(250px)';
+        row.classList.remove('zoom-in');
+        
+        // Update content first
+        const laneNumberContent = row.querySelector('.LaneNumber .content');
+        if (laneNumberContent) {
+            laneNumberContent.textContent = lane;
+        }
+        
+        const nameElement = row.querySelector('.SwimmerInfo .name');
+        if (nameElement) {
+            nameElement.textContent = formattedName;
+            adjustFontSize(nameElement, 0.60);
+        }
+        
+        const splitTimeElement = row.querySelector('.SwimmerInfo .splitTime');
+        if (splitTimeElement) {
+            let displayTime;
+            
+            if (parseInt(place) === 1) {
+                displayTime = formatTime(time);
+            } else if (leaderState.leaderTime) {
+                displayTime = calculateTimeDifference(time, leaderState.leaderTime);
+            } else {
+                displayTime = formatTime(time);
+            }
+            
+            splitTimeElement.textContent = displayTime;
+        }
+        
+        // Show and animate the row
+        row.style.visibility = 'visible';
+       // Use setTimeout to trigger animation
+        setTimeout(() => {
+            row.classList.add('zoom-in');
+        }, 10);
+        
+        // Use setTimeout to ensure the removal takes effect
+        setTimeout(() => {
+            row.classList.add('zoom-in');
+           
+        }, 10);
+        
+    } else {
+        
+    }
+}
+
+// Leader state tracking
+let leaderState = {
+    lastSplitTime: null,
+    timeNumber: 0,
+    place: null,
+    softResetTimeout: null,
+	leaderTime: null
+};
+
+// Calculate time difference from leader
+function calculateTimeDifference(swimmerTime, leaderTime) {
+    // Convert times from MM:SS.ss or SS.ss format to total seconds
+    function timeToSeconds(time) {
+        const parts = time.split(':');
+        if (parts.length === 2) {
+            // Format: MM:SS.ss
+            const minutes = parseInt(parts[0]);
+            const seconds = parseFloat(parts[1]);
+            return minutes * 60 + seconds;
+        } else {
+            // Format: SS.ss
+            return parseFloat(time);
+        }
+    }
+    
+    const swimmerSeconds = timeToSeconds(swimmerTime);
+    const leaderSeconds = timeToSeconds(leaderTime);
+    const difference = swimmerSeconds - leaderSeconds;
+    
+    // Format as +X.XX
+    return '+' + difference.toFixed(2);
+}
+
+// Check if split time should be shown
+function shouldShowSplitTime(data) {
+    const finishTime = data.finishTime;
+    const place = parseInt(finishTime.place);
+    const timeNumber = finishTime.timeNumber;
+    const currentTime = Date.now();
+    
+    // Always show first place
+    if (place === 1) {
+        leaderState.lastSplitTime = currentTime;
+        leaderState.timeNumber = timeNumber;
+        leaderState.place = place;
+		leaderState.leaderTime = finishTime.time;  // ADD THIS LINE
+        
+        
+        // Clear any existing soft reset timeout
+        if (leaderState.softResetTimeout) {
+            clearTimeout(leaderState.softResetTimeout);
+        }
+        
+        // Schedule soft reset for 10 seconds after leader's split
+        leaderState.softResetTimeout = setTimeout(() => {
+            
+            softResetRows();
+        }, 10000);
+        
+        return true;
+    }
+    
+    // Check if they've been lapped
+    if (timeNumber < leaderState.timeNumber) {
+        
+        return false;
+    }
+    
+    // Check if more than 10 seconds since leader's last split
+    if (leaderState.lastSplitTime) {
+        const timeSinceLeader = (currentTime - leaderState.lastSplitTime) / 1000;
+        if (timeSinceLeader > 10) {
+            
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+// Soft reset - clear display but keep tracking
+function softResetRows() {
+    
+    
+    const container = document.querySelector('.container');
+   
+    
+    // Add fade out animation
+    container.classList.add('fade-out');
+    
+    // Wait for animation to complete before hiding
+    setTimeout(() => {
+       
+        container.style.visibility = 'hidden';
+        container.style.opacity = '0';
+        container.classList.remove('fade-out');
+        
+        const rows = document.querySelectorAll('.row');
+        
+        rows.forEach(row => {
+            const laneNumberContent = row.querySelector('.LaneNumber .content');
+            if (laneNumberContent) {
+                laneNumberContent.textContent = '';
+            }
+            
+            const nameElement = row.querySelector('.SwimmerInfo .name');
+            if (nameElement) {
+                nameElement.textContent = '';
+            }
+            
+            const splitTimeElement = row.querySelector('.SwimmerInfo .splitTime');
+            if (splitTimeElement) {
+                splitTimeElement.textContent = '';
+            }
+            
+            row.style.visibility = 'hidden';
+            row.classList.remove('zoom-in');
+        });
+    }, 500);
+}
+
+// Full reset - clear everything including tracking
+function resetAllRows() {
+    
+    
+    if (leaderState.softResetTimeout) {
+        clearTimeout(leaderState.softResetTimeout);
+    }
+    
+    leaderState = {
+        lastSplitTime: null,
+        timeNumber: 0,
+        place: null,
+        softResetTimeout: null,
+		leaderTime: null
+    };
+    const container = document.querySelector('.container');
+    
+    // Add fade out animation
+    container.classList.add('fade-out');
+    
+    // Wait for animation to complete
+    setTimeout(() => {
+        container.style.visibility = 'hidden';
+        container.classList.remove('fade-out');
+        
+        const rows = document.querySelectorAll('.row');
+        
+        rows.forEach(row => {
+            const laneNumberContent = row.querySelector('.LaneNumber .content');
+            if (laneNumberContent) {
+                laneNumberContent.textContent = '';
+            }
+            
+            const nameElement = row.querySelector('.SwimmerInfo .name');
+            if (nameElement) {
+                nameElement.textContent = '';
+            }
+            
+            const splitTimeElement = row.querySelector('.SwimmerInfo .splitTime');
+            if (splitTimeElement) {
+                splitTimeElement.textContent = '';
+            }
+            
+            row.style.visibility = 'hidden';
+            row.classList.remove('zoom-in');
+        });
+    }, 500);
+}
+
+// Timer state tracking
+let timerWasRunning = false;
+
+// Handle timer sync messages
+function handleTimerSync(data) {
+    const isRunning = data.timerSync.running;
+    const container = document.querySelector('.container');
+    
+    if (!isRunning && timerWasRunning) {
+        container.style.visibility = 'hidden';
+        resetAllRows();
+        timerWasRunning = false;
+    } else if (isRunning) {
+        timerWasRunning = true;
+    }
+}
+</script>
+
+<!-- 4. WebSocket connection LAST -->
+<script>
+const wsUrl = "ws://localhost:8001";
+let ws;
+
+function connectWebSocket() {
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+        console.log('[WS] Connected to Swim Live System');
+    };
+
+    ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        // Handle timer sync
+        if (data.timerSync) {
+            handleTimerSync(data);
+        }
+
+        // Only process split times
+        if (data.finishTime && data.finishTime.type === "SPLIT") {
+            
+            if (shouldShowSplitTime(data)) {
+                updateSplitTime(data);
+            }
+        }
+    };
+
+    ws.onclose = () => {
+        console.log('[WS] Connection closed. Reconnecting...');
+        setTimeout(connectWebSocket, 1000);
+    };
+
+    ws.onerror = (error) => {
+        console.error('[WS] WebSocket error:', error);
+    };
+}
+
+window.addEventListener('load', connectWebSocket);
+
+window.addEventListener('beforeunload', () => {
+    if (ws) ws.close();
+});
+</script>
+
+</head>
+<body>
+    <div class="container">
+        <!-- Row 1 -->
+        <div class="row" id ="1">
+            <div class="box LaneNumber">
+                <div class="content"></div>
+            </div>
+            <div class="box SwimmerInfo">
+                <div class="name"></div>
+                <div class="splitTime"></div>
+            </div>
+        </div>
+        <!-- Row 2 -->
+        <div class="row" id ="2">
+            <div class="box LaneNumber">
+                <div class="content"></div>
+            </div>
+            <div class="box SwimmerInfo">
+                <div class="name"></div>
+                <div class="splitTime"></div>
+            </div>
+        </div>
+        <!-- Row 3 -->
+        <div class="row" id ="3">
+            <div class="box LaneNumber">
+                <div class="content"></div>
+            </div>
+            <div class="box SwimmerInfo">
+                <div class="name"></div>
+                <div class="splitTime"></div>
+            </div>
+        </div>
+        <!-- Row 4 -->
+        <div class="row" id ="4">
+            <div class="box LaneNumber">
+                <div class="content"></div>
+            </div>
+            <div class="box SwimmerInfo">
+                <div class="name"></div>
+                <div class="splitTime"></div>
+            </div>
+        </div>
+		<!-- Row 5 -->
+        <div class="row" id ="5">
+            <div class="box LaneNumber">
+                <div class="content"></div>
+            </div>
+            <div class="box SwimmerInfo">
+                <div class="name"></div>
+                <div class="splitTime"></div>
+            </div>
+        </div>
+		<!-- Row 6 -->
+        <div class="row" id ="6">
+            <div class="box LaneNumber">
+                <div class="content"></div>
+            </div>
+            <div class="box SwimmerInfo">
+                <div class="name"></div>
+                <div class="splitTime"></div>
+            </div>
+        </div>
+		<!-- Row 7 -->
+        <div class="row" id ="7">
+            <div class="box LaneNumber">
+                <div class="content"></div>
+            </div>
+            <div class="box SwimmerInfo">
+                <div class="name"></div>
+                <div class="splitTime"></div>
+            </div>
+        </div>
+		<!-- Row 8 -->
+        <div class="row" id ="8">
+            <div class="box LaneNumber">
+                <div class="content"></div>
+            </div>
+            <div class="box SwimmerInfo">
+                <div class="name"></div>
+                <div class="splitTime"></div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
