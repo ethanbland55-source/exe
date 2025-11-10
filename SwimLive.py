@@ -2,6 +2,7 @@ import serial
 import serial.tools.list_ports
 import time
 import json
+import requests
 import asyncio
 import websockets
 import threading
@@ -38,6 +39,10 @@ class SwimLiveSystem:
     TIMER_SYNC_INTERVAL = 0.1  # Sync every 100ms for better accuracy
     TIMER_LATENCY_COMPENSATION = 0.25  # Compensate for ~250ms lag
     DQ_STALE_TIMEOUT = 5.0 # Ignore DQ flags in first 5 seconds of a race
+
+    # WordPress settings
+    WORDPRESS_URL = "https://carnforthotters.co.uk/wp-json/swimlive/v1/update"
+    WORDPRESS_ENABLED = True  # Set to False to disable WordPress posting
     
     def __init__(self, cts_port: str, receiver_port: str, baud: int = 9600):
         # Base directory setup
@@ -3419,6 +3424,49 @@ window.addEventListener('beforeunload', () => {
         """Queue data to be sent to WebSocket clients."""
         if self.running:
             self.data_queue.put(data)
+
+        if self.WORDPRESS_ENABLED:
+            self._send_to_wordpress(data)
+
+    def _send_to_wordpress(self, data: Dict) -> None:
+        """Send data to WordPress endpoint (non-blocking)."""
+        try:
+            # Send in a separate thread so it doesn't slow down WebSocket
+            threading.Thread(
+                target=self._wordpress_post_thread,
+                args=(data,),
+                daemon=True
+            ).start()
+        except Exception as e:
+            # Don't let WordPress errors break WebSocket functionality
+            print(f"[WP] Error queuing WordPress post: {e}")
+
+    def _wordpress_post_thread(self, data: Dict) -> None:
+        """Thread worker to POST data to WordPress."""
+        try:
+            response = requests.post(
+                self.WORDPRESS_URL,
+                json=data,
+                timeout=2  # 2 second timeout so it doesn't hang
+            )
+            
+            if response.status_code == 200:
+                # Only log on first successful post, then stay quiet
+                if not hasattr(self, '_wp_connected'):
+                    print(f"[WP] Connected to WordPress successfully")
+                    self._wp_connected = True
+            else:
+                print(f"[WP] WordPress returned status {response.status_code}")
+                
+        except requests.exceptions.Timeout:
+            # Timeout is fine, just skip this update
+            pass
+        except requests.exceptions.ConnectionError:
+            if not hasattr(self, '_wp_connection_warned'):
+                print(f"[WP] Cannot reach WordPress - check URL or internet connection")
+                self._wp_connection_warned = True
+        except Exception as e:
+            print(f"[WP] WordPress error: {e}")
     
     def _handle_event_change(self, event: str, heat: str) -> None:
         """Handle event/heat changes."""
