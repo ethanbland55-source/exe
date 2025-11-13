@@ -11,6 +11,7 @@ from pathlib import Path
 from queue import Queue
 import tkinter as tk
 from tkinter import ttk
+from obswebsocket import obsws, requests
 import base64
 
 class SwimLiveSystem:
@@ -31,7 +32,6 @@ class SwimLiveSystem:
     RACE_TIME_CHANNEL = 0x00
     LANE_CHANNELS = range(0x01, 0x08)
 
-    
     # Network settings
     WEBSOCKET_PORT = 8001
 
@@ -40,11 +40,8 @@ class SwimLiveSystem:
     TIMER_LATENCY_COMPENSATION = 0.25  # Compensate for ~250ms lag
     DQ_STALE_TIMEOUT = 5.0 # Ignore DQ flags in first 5 seconds of a race
 
-    # WordPress settings
-    WORDPRESS_URL = "https://carnforthotters.co.uk/wp-json/swimlive/v1/update"
-    WORDPRESS_ENABLED = True  # Set to False to disable WordPress posting
     
-    def __init__(self, cts_port: str, receiver_port: str, baud: int = 9600):
+    def __init__(self, cts_port: str, receiver_port: str, baud: int = 9600, test_mode: bool = False):
         # Base directory setup
         self.base_dir = Path.home() / "Documents" / "Swim Live"
         self.base_dir.mkdir(parents=True, exist_ok=True)
@@ -53,6 +50,8 @@ class SwimLiveSystem:
         self.event_files_path.mkdir(parents=True, exist_ok=True)
         
         self.html_dir = self.base_dir
+
+        self.test_mode = test_mode
         
         # Serial settings
         self.cts_port = cts_port
@@ -91,6 +90,7 @@ class SwimLiveSystem:
         self.timer_start_time = None
         self.timer_offset = 0.0
         self._last_sync_time = 0
+        self._last_scene_check = 0
         
         # WebSocket components
         self.websocket_clients = set()
@@ -106,9 +106,29 @@ class SwimLiveSystem:
         
         # Generate HTML files
         self._generate_html_files()
+
+        # OBS WebSocket setup
+        self.obs_host = "localhost"
+        self.obs_port = 4455  # Default OBS WebSocket port
+        self.obs_password = "123456"  # <-- Set this to your OBS password
+
+        try:
+            self.obs = obsws(self.obs_host, self.obs_port, self.obs_password)
+            self.obs.connect()
+            print("[OBS] Connected successfully")
+        except Exception as e:
+            self.obs = None
+            print(f"[OBS] Connection to OBS failed: {e}")
+
         
     def _setup_serial(self) -> None:
         """Initialize serial connections."""
+        if self.test_mode:
+            print("[TEST MODE] Skipping serial port initialization")
+            self.cts_serial = None
+            self.receiver_serial = None
+            return
+        
         # CTS Gen7 connection
         self.cts_serial = serial.Serial(
             port=self.cts_port,
@@ -116,7 +136,7 @@ class SwimLiveSystem:
             bytesize=serial.EIGHTBITS,
             parity=self.parity,
             stopbits=serial.STOPBITS_ONE,
-            timeout=0.001,  # Very short timeout for non-blocking
+            timeout=0.001,
             rtscts=False,
             dsrdtr=False
         )
@@ -128,7 +148,7 @@ class SwimLiveSystem:
             bytesize=serial.EIGHTBITS,
             parity=serial.PARITY_NONE,
             stopbits=serial.STOPBITS_ONE,
-            timeout=0.001,  # Very short timeout for non-blocking
+            timeout=0.001,
             rtscts=False,
             dsrdtr=False
         )
@@ -363,8 +383,9 @@ class SwimLiveSystem:
             height: 100vh;
 			font-family: Helvetica, serif;
 			overflow: hidden;
-			perspective: 1500px;
-			perspective-origin: 50% 50%;
+			/* Adjusted Perspective to match high/oblique angle */
+			perspective: 1500px; 
+			perspective-origin: 50% 35%;
         }
 		
 		@keyframes expandLaneNumber {
@@ -401,14 +422,19 @@ class SwimLiveSystem:
 		#laneWrapper {
 			transform-style: preserve-3d;
 			position: relative;
+			/* This wrapper helps position the whole group */
+			transform: translateY(-200px); 
 		}
 
 		/* Each lane cube wrapper */
         .lane-cube {
 			transform-style: preserve-3d;
-			position: relative;
+			position: absolute; /* Changed to absolute to stack them and allow independent positioning */
 			opacity: 0;
 			transition: transform 0.3s ease;
+			/* Set common defaults */
+			top: 0;
+			left: 0;
         }
 
 		/* The actual lane container is the bottom face of the cube */
@@ -480,7 +506,7 @@ class SwimLiveSystem:
 			animation: fadeOut 1s ease forwards;
 		}
 
-		/* Control panel */
+		/* Control panel styles (KEEP) */
 		.control-panel {
 			position: fixed;
 			top: 20px;
@@ -761,15 +787,15 @@ class SwimLiveSystem:
 	</div>
 
 	<div class="control-panel" id="controlPanel">
-		<h2>🎲 Cube Projection System</h2>
+		<h2>ðŸŽ² Cube Projection System</h2>
 		
 		<div class="instructions">
-			<strong>True IASAS Method:</strong>
-			Each lane is the bottom face of an imaginary cube. Rotate the cube in 3D space to project the graphic onto the pool surface from your camera's viewpoint!
+			<strong>Per-Lane Fine-Tuning:</strong>
+			Select an individual lane (L1-L8) to adjust its position and rotation. The **Translate Z** slider has a greatly increased range to handle severe perspective changes.
 		</div>
 
 		<div class="control-section">
-			<h3>Camera Perspective</h3>
+			<h3>Camera Perspective (Global)</h3>
 			
 			<div class="control-group">
 				<label>
@@ -790,40 +816,40 @@ class SwimLiveSystem:
 			<div class="control-group">
 				<label>
 					<span>View Y Origin</span>
-					<span class="value-display" id="perspectiveYValue">50%</span>
+					<span class="value-display" id="perspectiveYValue">35%</span>
 				</label>
-				<input type="range" id="perspectiveY" min="0" max="100" step="1" value="50">
+				<input type="range" id="perspectiveY" min="0" max="100" step="1" value="35">
 			</div>
 		</div>
 
 		<div class="control-section">
-			<h3>Select Lane to Adjust</h3>
+			<h3>Select Lane to Adjust (Individual)</h3>
 			<div class="lane-select">
-				<button onclick="selectLane('all')" class="active" id="btnAll">ALL</button>
+				<button onclick="selectLane('all')" id="btnAll">ALL</button>
 				<button onclick="selectLane(1)" id="btn1">L1</button>
 				<button onclick="selectLane(2)" id="btn2">L2</button>
 				<button onclick="selectLane(3)" id="btn3">L3</button>
-				<button onclick="selectLane(4)" id="btn4">L4</button>
+				<button onclick="selectLane(4)" id="btn4" class="active">L4</button>
 				<button onclick="selectLane(5)" id="btn5">L5</button>
 				<button onclick="selectLane(6)" id="btn6">L6</button>
 				<button onclick="selectLane(7)" id="btn7">L7</button>
 				<button onclick="selectLane(8)" id="btn8">L8</button>
 			</div>
 
-			<span class="all-lanes-label" id="controlLabel">Adjusting: ALL LANES</span>
+			<span class="all-lanes-label" id="controlLabel">Adjusting: LANE 4</span>
 
 			<div class="control-group">
 				<label>
 					<span>Rotate X (Tilt)</span>
-					<span class="value-display" id="rotateXValue">60°</span>
+					<span class="value-display" id="rotateXValue">68Â°</span>
 				</label>
-				<input type="range" id="rotateX" min="0" max="90" step="0.5" value="60">
+				<input type="range" id="rotateX" min="0" max="90" step="0.5" value="68">
 			</div>
 
 			<div class="control-group">
 				<label>
-					<span>Rotate Y (Turn)</span>
-					<span class="value-display" id="rotateYValue">0°</span>
+					<span>Rotate Y (Turn/Skew)</span>
+					<span class="value-display" id="rotateYValue">0Â°</span>
 				</label>
 				<input type="range" id="rotateY" min="-45" max="45" step="0.5" value="0">
 			</div>
@@ -831,7 +857,7 @@ class SwimLiveSystem:
 			<div class="control-group">
 				<label>
 					<span>Rotate Z (Roll)</span>
-					<span class="value-display" id="rotateZValue">0°</span>
+					<span class="value-display" id="rotateZValue">0Â°</span>
 				</label>
 				<input type="range" id="rotateZ" min="-15" max="15" step="0.1" value="0">
 			</div>
@@ -841,7 +867,7 @@ class SwimLiveSystem:
 					<span>Translate X (Left/Right)</span>
 					<span class="value-display" id="translateXValue">0px</span>
 				</label>
-				<input type="range" id="translateX" min="-500" max="500" step="5" value="0">
+				<input type="range" id="translateX" min="-1000" max="1000" step="5" value="0">
 			</div>
 
 			<div class="control-group">
@@ -849,25 +875,25 @@ class SwimLiveSystem:
 					<span>Translate Y (Up/Down)</span>
 					<span class="value-display" id="translateYValue">0px</span>
 				</label>
-				<input type="range" id="translateY" min="-500" max="500" step="5" value="0">
+				<input type="range" id="translateY" min="-1000" max="1000" step="5" value="0">
 			</div>
 
 			<div class="control-group">
 				<label>
-					<span>Translate Z (Depth)</span>
+					<span>Translate Z (Depth/Scale)</span>
 					<span class="value-display" id="translateZValue">0px</span>
 				</label>
-				<input type="range" id="translateZ" min="-800" max="400" step="10" value="0">
+				<input type="range" id="translateZ" min="-2000" max="1000" step="10" value="0">
 			</div>
 		</div>
 
 		<div class="control-section">
 			<h3>Quick Presets</h3>
 			<div class="preset-buttons">
+				<button onclick="applyPreset('calibrated')">Calibrated (Current Image)</button>
 				<button onclick="applyPreset('flat')">Flat View</button>
 				<button onclick="applyPreset('broadcast')">Broadcast</button>
 				<button onclick="applyPreset('olympic')">Olympic</button>
-				<button onclick="applyPreset('overhead')">Overhead</button>
 			</div>
 		</div>
 
@@ -877,12 +903,12 @@ class SwimLiveSystem:
 		</div>
 
 		<div style="margin-top: 12px; padding: 12px; background: rgba(0, 217, 255, 0.2); border-radius: 8px; text-align: center; color: #00D9FF; font-size: 12px;">
-			Each lane = bottom of cube • Rotate cube to project
+			Each lane = bottom of cube â€¢ Rotate cube to project
 		</div>
 	</div>
 
 	<script>
-	// Club name scaling
+	// Club name scaling (KEEP)
 	document.addEventListener("DOMContentLoaded", () => {
 		const clubElements = document.querySelectorAll(".club");
 		const targetText = "LBORO UNI";
@@ -914,7 +940,7 @@ class SwimLiveSystem:
 	</script>
 	
 	<script>
-	// Name font size adjustment
+	// Name font size adjustment (KEEP)
 	document.addEventListener("DOMContentLoaded", () => {
 		const laneContainers = document.querySelectorAll(".container");
 
@@ -943,7 +969,7 @@ class SwimLiveSystem:
 	</script>
 	
 	<script>
-	// Animation timing
+	// Animation timing (KEEP)
 	document.addEventListener("DOMContentLoaded", () => {
 		const laneGroups = [
 			[4, 5],
@@ -972,24 +998,45 @@ class SwimLiveSystem:
 	</script>
 	
 	<script>
-		// Cube projection settings - each lane cube can be independently transformed
-		const cubeSettings = {
+		// --- Custom Calibration Data for Your Image ---
+		const CALIBRATED_SETTINGS = {
+			perspective: 1500,
+			perspectiveX: 50,
+			perspectiveY: 35, 
+			lanes: {
+				// Base Rotation (Rotate X) is ~68 deg
+				// Trans Y/Z is adjusted to create convergence towards lane 1 and separation between lanes.
+				1: { rotateX: 69.5, rotateY: 3.5, rotateZ: 0.1, translateX: -120, translateY: -250, translateZ: 350 }, // Furthest away, most skewed/foreshortened
+				2: { rotateX: 69, rotateY: 1.5, rotateZ: 0.1, translateX: -70, translateY: -170, translateZ: 250 },
+				3: { rotateX: 68.5, rotateY: 0.5, rotateZ: 0.0, translateX: -20, translateY: -80, translateZ: 120 },
+				4: { rotateX: 68, rotateY: 0, rotateZ: 0, translateX: 0, translateY: 0, translateZ: 0 }, // Center/Reference Lane
+				5: { rotateX: 68, rotateY: 0, rotateZ: 0, translateX: 0, translateY: 100, translateZ: -100 },
+				6: { rotateX: 67.5, rotateY: -0.5, rotateZ: 0.0, translateX: 20, translateY: 220, translateZ: -240 },
+				7: { rotateX: 67, rotateY: -1.5, rotateZ: -0.1, translateX: 70, translateY: 360, translateZ: -380 },
+				8: { rotateX: 66.5, rotateY: -3.5, rotateZ: -0.1, translateX: 130, translateY: 500, translateZ: -500 } // Closest, least foreshortened
+			}
+		};
+
+		const BROADCAST_SETTINGS = { // Standard/Flatter preset
 			perspective: 1500,
 			perspectiveX: 50,
 			perspectiveY: 50,
 			lanes: {
-				1: { rotateX: 60, rotateY: 0, rotateZ: 0, translateX: 0, translateY: 0, translateZ: 0 },
-				2: { rotateX: 60, rotateY: 0, rotateZ: 0, translateX: 0, translateY: 0, translateZ: 0 },
-				3: { rotateX: 60, rotateY: 0, rotateZ: 0, translateX: 0, translateY: 0, translateZ: 0 },
-				4: { rotateX: 60, rotateY: 0, rotateZ: 0, translateX: 0, translateY: 0, translateZ: 0 },
-				5: { rotateX: 60, rotateY: 0, rotateZ: 0, translateX: 0, translateY: 0, translateZ: 0 },
-				6: { rotateX: 60, rotateY: 0, rotateZ: 0, translateX: 0, translateY: 0, translateZ: 0 },
-				7: { rotateX: 60, rotateY: 0, rotateZ: 0, translateX: 0, translateY: 0, translateZ: 0 },
-				8: { rotateX: 60, rotateY: 0, rotateZ: 0, translateX: 0, translateY: 0, translateZ: 0 }
+				1: { rotateX: 60, rotateY: 0, rotateZ: 0, translateX: 0, translateY: -360, translateZ: 250 },
+				2: { rotateX: 60, rotateY: 0, rotateZ: 0, translateX: 0, translateY: -240, translateZ: 150 },
+				3: { rotateX: 60, rotateY: 0, rotateZ: 0, translateX: 0, translateY: -120, translateZ: 50 },
+				4: { rotateX: 60, rotateY: 0, rotateZ: 0, translateX: 0, translateY: 0, translateZ: -50 },
+				5: { rotateX: 60, rotateY: 0, rotateZ: 0, translateX: 0, translateY: 120, translateZ: -150 },
+				6: { rotateX: 60, rotateY: 0, rotateZ: 0, translateX: 0, translateY: 240, translateZ: -250 },
+				7: { rotateX: 60, rotateY: 0, rotateZ: 0, translateX: 0, translateY: 360, translateZ: -350 },
+				8: { rotateX: 60, rotateY: 0, rotateZ: 0, translateX: 0, translateY: 480, translateZ: -450 }
 			}
 		};
+		// --- End Calibration Data ---
 
-		let selectedLane = 'all';
+
+		let cubeSettings = JSON.parse(JSON.stringify(CALIBRATED_SETTINGS)); // Start with calibrated
+		let selectedLane = 4; // Start with Lane 4 selected
 		let isInteracting = false;
 		let interactTimeout = null;
 
@@ -997,6 +1044,7 @@ class SwimLiveSystem:
 			setupControls();
 			applyAllCubeTransforms();
 			detectInteractMode();
+			selectLane(4); // Start with Lane 4 selected for fine-tuning
 		});
 
 		function detectInteractMode() {
@@ -1036,7 +1084,7 @@ class SwimLiveSystem:
 			});
 			if (lane === 'all') {
 				document.getElementById('btnAll').classList.add('active');
-				document.getElementById('controlLabel').textContent = 'Adjusting: ALL LANES';
+				document.getElementById('controlLabel').textContent = 'Adjusting: ALL LANES (WARNING: Edits apply uniformly)';
 			} else {
 				document.getElementById('btn' + lane).classList.add('active');
 				document.getElementById('controlLabel').textContent = 'Adjusting: LANE ' + lane;
@@ -1047,24 +1095,26 @@ class SwimLiveSystem:
 		}
 
 		function updateSlidersForSelection() {
-			if (selectedLane === 'all') {
-				// Show lane 1's values as reference
-				const settings = cubeSettings.lanes[1];
-				document.getElementById('rotateX').value = settings.rotateX;
-				document.getElementById('rotateY').value = settings.rotateY;
-				document.getElementById('rotateZ').value = settings.rotateZ;
-				document.getElementById('translateX').value = settings.translateX;
-				document.getElementById('translateY').value = settings.translateY;
-				document.getElementById('translateZ').value = settings.translateZ;
-			} else {
-				const settings = cubeSettings.lanes[selectedLane];
-				document.getElementById('rotateX').value = settings.rotateX;
-				document.getElementById('rotateY').value = settings.rotateY;
-				document.getElementById('rotateZ').value = settings.rotateZ;
-				document.getElementById('translateX').value = settings.translateX;
-				document.getElementById('translateY').value = settings.translateY;
-				document.getElementById('translateZ').value = settings.translateZ;
-			}
+			const referenceLane = (selectedLane === 'all' || selectedLane === null) ? 4 : selectedLane; // Use lane 4 as a central reference for ALL
+			
+			// Apply perspective settings globally
+			document.body.style.perspective = cubeSettings.perspective + 'px';
+			document.body.style.perspectiveOrigin = `${cubeSettings.perspectiveX}% ${cubeSettings.perspectiveY}%`;
+
+			// Update perspective controls directly from cubeSettings
+			document.getElementById('perspective').value = cubeSettings.perspective;
+			document.getElementById('perspectiveX').value = cubeSettings.perspectiveX;
+			document.getElementById('perspectiveY').value = cubeSettings.perspectiveY;
+
+			// Update transform controls from selected/reference lane
+			const settings = cubeSettings.lanes[referenceLane];
+			document.getElementById('rotateX').value = settings.rotateX;
+			document.getElementById('rotateY').value = settings.rotateY;
+			document.getElementById('rotateZ').value = settings.rotateZ;
+			document.getElementById('translateX').value = settings.translateX;
+			document.getElementById('translateY').value = settings.translateY;
+			document.getElementById('translateZ').value = settings.translateZ;
+			
 			updateValueDisplays();
 		}
 
@@ -1072,9 +1122,9 @@ class SwimLiveSystem:
 			document.getElementById('perspectiveValue').textContent = cubeSettings.perspective + 'px';
 			document.getElementById('perspectiveXValue').textContent = cubeSettings.perspectiveX + '%';
 			document.getElementById('perspectiveYValue').textContent = cubeSettings.perspectiveY + '%';
-			document.getElementById('rotateXValue').textContent = document.getElementById('rotateX').value + '°';
-			document.getElementById('rotateYValue').textContent = document.getElementById('rotateY').value + '°';
-			document.getElementById('rotateZValue').textContent = document.getElementById('rotateZ').value + '°';
+			document.getElementById('rotateXValue').textContent = document.getElementById('rotateX').value + 'Â°';
+			document.getElementById('rotateYValue').textContent = document.getElementById('rotateY').value + 'Â°';
+			document.getElementById('rotateZValue').textContent = document.getElementById('rotateZ').value + 'Â°';
 			document.getElementById('translateXValue').textContent = document.getElementById('translateX').value + 'px';
 			document.getElementById('translateYValue').textContent = document.getElementById('translateY').value + 'px';
 			document.getElementById('translateZValue').textContent = document.getElementById('translateZ').value + 'px';
@@ -1084,103 +1134,45 @@ class SwimLiveSystem:
 			// Perspective controls
 			document.getElementById('perspective').addEventListener('input', (e) => {
 				cubeSettings.perspective = parseFloat(e.target.value);
-				document.body.style.perspective = cubeSettings.perspective + 'px';
-				updateValueDisplays();
+				updateSlidersForSelection(); // Applies new global settings
+				applyAllCubeTransforms();
 			});
 
 			document.getElementById('perspectiveX').addEventListener('input', (e) => {
 				cubeSettings.perspectiveX = parseFloat(e.target.value);
-				document.body.style.perspectiveOrigin = `${cubeSettings.perspectiveX}% ${cubeSettings.perspectiveY}%`;
-				updateValueDisplays();
+				updateSlidersForSelection(); 
+				applyAllCubeTransforms();
 			});
 
 			document.getElementById('perspectiveY').addEventListener('input', (e) => {
 				cubeSettings.perspectiveY = parseFloat(e.target.value);
-				document.body.style.perspectiveOrigin = `${cubeSettings.perspectiveX}% ${cubeSettings.perspectiveY}%`;
-				updateValueDisplays();
+				updateSlidersForSelection(); 
+				applyAllCubeTransforms();
 			});
 
 			// Cube transform controls
-			document.getElementById('rotateX').addEventListener('input', (e) => {
-				const value = parseFloat(e.target.value);
-				if (selectedLane === 'all') {
-					for (let i = 1; i <= 8; i++) {
-						cubeSettings.lanes[i].rotateX = value;
-					}
-				} else {
-					cubeSettings.lanes[selectedLane].rotateX = value;
-				}
-				applyAllCubeTransforms();
-				updateValueDisplays();
-			});
+			const transformControls = ['rotateX', 'rotateY', 'rotateZ', 'translateX', 'translateY', 'translateZ'];
+			transformControls.forEach(control => {
+				document.getElementById(control).addEventListener('input', (e) => {
+					const value = parseFloat(e.target.value);
+					const prop = control;
 
-			document.getElementById('rotateY').addEventListener('input', (e) => {
-				const value = parseFloat(e.target.value);
-				if (selectedLane === 'all') {
-					for (let i = 1; i <= 8; i++) {
-						cubeSettings.lanes[i].rotateY = value;
+					if (selectedLane === 'all') {
+						// Apply uniform change to all lanes
+						for (let i = 1; i <= 8; i++) {
+							cubeSettings.lanes[i][prop] = value;
+						}
+					} else {
+						// Apply change only to the selected lane
+						cubeSettings.lanes[selectedLane][prop] = value;
 					}
-				} else {
-					cubeSettings.lanes[selectedLane].rotateY = value;
-				}
-				applyAllCubeTransforms();
-				updateValueDisplays();
-			});
-
-			document.getElementById('rotateZ').addEventListener('input', (e) => {
-				const value = parseFloat(e.target.value);
-				if (selectedLane === 'all') {
-					for (let i = 1; i <= 8; i++) {
-						cubeSettings.lanes[i].rotateZ = value;
-					}
-				} else {
-					cubeSettings.lanes[selectedLane].rotateZ = value;
-				}
-				applyAllCubeTransforms();
-				updateValueDisplays();
-			});
-
-			document.getElementById('translateX').addEventListener('input', (e) => {
-				const value = parseFloat(e.target.value);
-				if (selectedLane === 'all') {
-					for (let i = 1; i <= 8; i++) {
-						cubeSettings.lanes[i].translateX = value;
-					}
-				} else {
-					cubeSettings.lanes[selectedLane].translateX = value;
-				}
-				applyAllCubeTransforms();
-				updateValueDisplays();
-			});
-
-			document.getElementById('translateY').addEventListener('input', (e) => {
-				const value = parseFloat(e.target.value);
-				if (selectedLane === 'all') {
-					for (let i = 1; i <= 8; i++) {
-						cubeSettings.lanes[i].translateY = value;
-					}
-				} else {
-					cubeSettings.lanes[selectedLane].translateY = value;
-				}
-				applyAllCubeTransforms();
-				updateValueDisplays();
-			});
-
-			document.getElementById('translateZ').addEventListener('input', (e) => {
-				const value = parseFloat(e.target.value);
-				if (selectedLane === 'all') {
-					for (let i = 1; i <= 8; i++) {
-						cubeSettings.lanes[i].translateZ = value;
-					}
-				} else {
-					cubeSettings.lanes[selectedLane].translateZ = value;
-				}
-				applyAllCubeTransforms();
-				updateValueDisplays();
+					applyAllCubeTransforms();
+					updateValueDisplays();
+				});
 			});
 
 			// Initialize displays
-			updateValueDisplays();
+			updateSlidersForSelection();
 		}
 
 		function applyAllCubeTransforms() {
@@ -1203,116 +1195,69 @@ class SwimLiveSystem:
 		}
 
 		function applyPreset(preset) {
-			switch(preset) {
-				case 'flat':
-					// Flat view - no rotation
-					for (let i = 1; i <= 8; i++) {
-						cubeSettings.lanes[i] = {
-							rotateX: 0,
-							rotateY: 0,
-							rotateZ: 0,
-							translateX: 0,
-							translateY: (i - 1) * 120,
-							translateZ: 0
-						};
-					}
-					break;
-				case 'broadcast':
-					// Standard broadcast angle - Olympic style
-					cubeSettings.perspective = 1500;
-					cubeSettings.perspectiveX = 50;
-					cubeSettings.perspectiveY = 50;
-					for (let i = 1; i <= 8; i++) {
-						cubeSettings.lanes[i] = {
-							rotateX: 60,
-							rotateY: 0,
-							rotateZ: 0,
-							translateX: 0,
-							translateY: (i - 1) * 120,
-							translateZ: -100 - (i - 1) * 50
-						};
-					}
-					break;
-				case 'olympic':
-					// True Olympic pool perspective
-					cubeSettings.perspective = 1800;
-					cubeSettings.perspectiveX = 50;
-					cubeSettings.perspectiveY = 40;
-					for (let i = 1; i <= 8; i++) {
-						cubeSettings.lanes[i] = {
-							rotateX: 65,
-							rotateY: 0,
-							rotateZ: 0,
-							translateX: 0,
-							translateY: (i - 1) * 115,
-							translateZ: -150 - (i - 1) * 60
-						};
-					}
-					break;
-				case 'overhead':
-					// Overhead referee view
-					cubeSettings.perspective = 2000;
-					cubeSettings.perspectiveX = 50;
-					cubeSettings.perspectiveY = 50;
-					for (let i = 1; i <= 8; i++) {
-						cubeSettings.lanes[i] = {
-							rotateX: 80,
-							rotateY: 0,
-							rotateZ: 0,
-							translateX: 0,
-							translateY: (i - 1) * 110,
-							translateZ: -200 - (i - 1) * 30
-						};
-					}
-					break;
+			let newSettings = {};
+			if (preset === 'calibrated') {
+				newSettings = JSON.parse(JSON.stringify(CALIBRATED_SETTINGS));
+			} else if (preset === 'broadcast') {
+				newSettings = JSON.parse(JSON.stringify(BROADCAST_SETTINGS));
+			} else if (preset === 'olympic') {
+				// Olympic Preset (similar to broadcast but slightly steeper)
+				newSettings = JSON.parse(JSON.stringify(BROADCAST_SETTINGS));
+				newSettings.perspective = 1800;
+				newSettings.perspectiveY = 40;
+				for (let i = 1; i <= 8; i++) {
+					newSettings.lanes[i].rotateX = 65;
+					newSettings.lanes[i].translateZ -= 50;
+				}
+			} else if (preset === 'flat') {
+				// Flat View - no perspective changes
+				newSettings.perspective = 10000;
+				newSettings.perspectiveX = 50;
+				newSettings.perspectiveY = 50;
+				for (let i = 1; i <= 8; i++) {
+					newSettings.lanes[i] = {
+						rotateX: 0,
+						rotateY: 0,
+						rotateZ: 0,
+						translateX: (i - 4.5) * 400, // Spread lanes horizontally
+						translateY: 0,
+						translateZ: 0
+					};
+				}
 			}
 			
-			// Update body perspective
-			document.body.style.perspective = cubeSettings.perspective + 'px';
-			document.body.style.perspectiveOrigin = `${cubeSettings.perspectiveX}% ${cubeSettings.perspectiveY}%`;
+			cubeSettings = newSettings;
 			
-			// Update controls
-			document.getElementById('perspective').value = cubeSettings.perspective;
-			document.getElementById('perspectiveX').value = cubeSettings.perspectiveX;
-			document.getElementById('perspectiveY').value = cubeSettings.perspectiveY;
-			
+			// Update controls and apply transforms
 			updateSlidersForSelection();
 			applyAllCubeTransforms();
 		}
 
 		function resetSelected() {
+			const resetSettings = CALIBRATED_SETTINGS.lanes;
+			
 			if (selectedLane === 'all') {
-				for (let i = 1; i <= 8; i++) {
-					cubeSettings.lanes[i] = {
-						rotateX: 60,
-						rotateY: 0,
-						rotateZ: 0,
-						translateX: 0,
-						translateY: 0,
-						translateZ: 0
-					};
-				}
+				// Reset all lanes to the Calibrated starting configuration
+				cubeSettings = JSON.parse(JSON.stringify(CALIBRATED_SETTINGS));
 			} else {
-				cubeSettings.lanes[selectedLane] = {
-					rotateX: 60,
-					rotateY: 0,
-					rotateZ: 0,
-					translateX: 0,
-					translateY: 0,
-					translateZ: 0
-				};
+				// Reset single lane to its Calibrated starting value
+				cubeSettings.lanes[selectedLane] = JSON.parse(JSON.stringify(resetSettings[selectedLane]));
 			}
+			
+			// Force update of global perspective settings on screen if needed
+			document.body.style.perspective = cubeSettings.perspective + 'px';
+			document.body.style.perspectiveOrigin = `${cubeSettings.perspectiveX}% ${cubeSettings.perspectiveY}%`;
 			
 			updateSlidersForSelection();
 			applyAllCubeTransforms();
 		}
 
 		function copySettings() {
-			let settingsText = `CAMERA PERSPECTIVE:\nperspective: ${cubeSettings.perspective}px\nperspectiveX: ${cubeSettings.perspectiveX}%\nperspectiveY: ${cubeSettings.perspectiveY}%\n\nLANE CUBES:\n`;
+			let settingsText = `CAMERA PERSPECTIVE (body style):\nperspective: ${cubeSettings.perspective}px\nperspectiveX: ${cubeSettings.perspectiveX}%\nperspectiveY: ${cubeSettings.perspectiveY}%\n\nLANE CUBES (Independent Transforms):\n`;
 			
 			for (let i = 1; i <= 8; i++) {
 				const s = cubeSettings.lanes[i];
-				settingsText += `Lane ${i}: rotateX=${s.rotateX}° rotateY=${s.rotateY}° rotateZ=${s.rotateZ}° translateX=${s.translateX}px translateY=${s.translateY}px translateZ=${s.translateZ}px\n`;
+				settingsText += `Lane ${i}: rotateX=${s.rotateX}Â° rotateY=${s.rotateY}Â° rotateZ=${s.rotateZ}Â° translateX=${s.translateX}px translateY=${s.translateY}px translateZ=${s.translateZ}px\n`;
 			}
 			
 			navigator.clipboard.writeText(settingsText).then(() => {
@@ -1322,6 +1267,7 @@ class SwimLiveSystem:
 	</script>
 	
 	<script>
+		// The WebSocket connection logic (KEEP)
 		const wsUrl = "ws://localhost:8001";
 		let timerStartDetected = false;
 
@@ -2466,7 +2412,7 @@ window.addEventListener('beforeunload', () => {
     </div>
 
     <div class="control-panel" id="controlPanel">
-        <h2>🎯 Lane Ends Projection</h2>
+        <h2>ðŸŽ¯ Lane Ends Projection</h2>
         
         <div class="instructions">
             <strong>Cube Projection System:</strong>
@@ -2520,7 +2466,7 @@ window.addEventListener('beforeunload', () => {
             <div class="control-group">
                 <label>
                     <span>Rotate X (Tilt)</span>
-                    <span class="value-display" id="rotateXValue">0°</span>
+                    <span class="value-display" id="rotateXValue">0Â°</span>
                 </label>
                 <input type="range" id="rotateX" min="0" max="90" step="0.5" value="0">
             </div>
@@ -2528,7 +2474,7 @@ window.addEventListener('beforeunload', () => {
             <div class="control-group">
                 <label>
                     <span>Rotate Y (Turn)</span>
-                    <span class="value-display" id="rotateYValue">0°</span>
+                    <span class="value-display" id="rotateYValue">0Â°</span>
                 </label>
                 <input type="range" id="rotateY" min="-45" max="45" step="0.5" value="0">
             </div>
@@ -2536,7 +2482,7 @@ window.addEventListener('beforeunload', () => {
             <div class="control-group">
                 <label>
                     <span>Rotate Z (Roll)</span>
-                    <span class="value-display" id="rotateZValue">0°</span>
+                    <span class="value-display" id="rotateZValue">0Â°</span>
                 </label>
                 <input type="range" id="rotateZ" min="-15" max="15" step="0.1" value="0">
             </div>
@@ -2582,7 +2528,7 @@ window.addEventListener('beforeunload', () => {
         </div>
 
         <div style="margin-top: 12px; padding: 12px; background: rgba(0, 217, 255, 0.2); border-radius: 8px; text-align: center; color: #00D9FF; font-size: 12px;">
-            Each result = bottom of cube • Rotate cube to project
+            Each result = bottom of cube â€¢ Rotate cube to project
         </div>
     </div>
 
@@ -2607,6 +2553,8 @@ window.addEventListener('beforeunload', () => {
         let selectedLane = 'all';
         let isInteracting = false;
         let interactTimeout = null;
+        let laneResults = {};
+
 
         window.addEventListener('load', function() {
             setupCubeControls();
@@ -2675,9 +2623,9 @@ window.addEventListener('beforeunload', () => {
             document.getElementById('perspectiveValue').textContent = cubeSettings.perspective + 'px';
             document.getElementById('perspectiveXValue').textContent = cubeSettings.perspectiveX + '%';
             document.getElementById('perspectiveYValue').textContent = cubeSettings.perspectiveY + '%';
-            document.getElementById('rotateXValue').textContent = document.getElementById('rotateX').value + '°';
-            document.getElementById('rotateYValue').textContent = document.getElementById('rotateY').value + '°';
-            document.getElementById('rotateZValue').textContent = document.getElementById('rotateZ').value + '°';
+            document.getElementById('rotateXValue').textContent = document.getElementById('rotateX').value + 'Â°';
+            document.getElementById('rotateYValue').textContent = document.getElementById('rotateY').value + 'Â°';
+            document.getElementById('rotateZValue').textContent = document.getElementById('rotateZ').value + 'Â°';
             document.getElementById('translateXValue').textContent = document.getElementById('translateX').value + 'px';
             document.getElementById('translateYValue').textContent = document.getElementById('translateY').value + 'px';
             document.getElementById('translateZValue').textContent = document.getElementById('translateZ').value + 'px';
@@ -2808,7 +2756,7 @@ window.addEventListener('beforeunload', () => {
             let text = `CAMERA PERSPECTIVE:\nperspective: ${cubeSettings.perspective}px\nperspectiveX: ${cubeSettings.perspectiveX}%\nperspectiveY: ${cubeSettings.perspectiveY}%\n\nLANE TRANSFORMS:\n`;
             for (let i = 1; i <= 8; i++) {
                 const s = cubeSettings.lanes[i];
-                text += `Lane ${i}: rotateX=${s.rotateX}° rotateY=${s.rotateY}° rotateZ=${s.rotateZ}° translateX=${s.translateX}px translateY=${s.translateY}px translateZ=${s.translateZ}px\n`;
+                text += `Lane ${i}: rotateX=${s.rotateX}Â° rotateY=${s.rotateY}Â° rotateZ=${s.rotateZ}Â° translateX=${s.translateX}px translateY=${s.translateY}px translateZ=${s.translateZ}px\n`;
             }
             navigator.clipboard.writeText(text).then(() => alert('Settings copied to clipboard!'));
         }
@@ -3064,6 +3012,2278 @@ window.addEventListener('beforeunload', () => {
     </script>
 </body>
 </html>'''
+        announcer_html = r'''<style>
+    #livestream-wrapper {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        z-index: 9999;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    }
+
+    #livestream-wrapper * {
+        box-sizing: border-box;
+    }
+
+    .livestream-login-container {
+        background: rgba(255, 255, 255, 0.95);
+        padding: 40px;
+        border-radius: 12px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        width: 90%;
+        max-width: 400px;
+    }
+
+    .livestream-login-container h1 {
+        text-align: center;
+        color: #1a1a2e;
+        margin-bottom: 30px;
+        font-size: 24px;
+        margin-top: 0;
+    }
+
+    .livestream-form-group {
+        margin-bottom: 20px;
+    }
+
+    .livestream-form-group label {
+        display: block;
+        margin-bottom: 8px;
+        color: #333;
+        font-weight: 500;
+    }
+
+    .livestream-form-group input {
+        width: 100%;
+        padding: 12px;
+        border: 2px solid #ddd;
+        border-radius: 6px;
+        font-size: 16px;
+        transition: border-color 0.3s;
+    }
+
+    .livestream-form-group input:focus {
+        outline: none;
+        border-color: #4a5568;
+    }
+
+    .livestream-password-container {
+        position: relative;
+    }
+
+    .livestream-toggle-password {
+        position: absolute;
+        right: 12px;
+        top: 50%;
+        transform: translateY(-50%);
+        background: none;
+        border: none;
+        color: #666;
+        cursor: pointer;
+        font-size: 14px;
+        padding: 4px 8px;
+    }
+
+    .livestream-toggle-password:hover {
+        color: #333;
+    }
+
+    .livestream-submit-btn {
+        width: 100%;
+        padding: 14px;
+        background: #1a1a2e;
+        color: white;
+        border: none;
+        border-radius: 6px;
+        font-size: 16px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.3s;
+    }
+
+    .livestream-submit-btn:hover {
+        background: #16213e;
+    }
+
+    .livestream-error-message {
+        color: #e53e3e;
+        text-align: center;
+        margin-top: 15px;
+        font-size: 14px;
+        display: none;
+    }
+
+    .livestream-error-message.show {
+        display: block;
+    }
+
+    .livestream-fullscreen-view {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        background: linear-gradient(135deg, #192954 0%, #004A90 100%);
+        animation: livestreamGradientFlow 8s ease infinite;
+        background-size: 200% 200%;
+        z-index: 10000;
+    }
+
+    .livestream-gala-title {
+        position: absolute;
+        top: 15px;
+        left: 0;
+        right: 0;
+        width: 100%;
+        text-align: center;
+        color: white !important;
+        font-family: Arial, sans-serif !important;
+        font-size: 48px !important;
+        font-weight: 700 !important;
+        margin: 0;
+        padding: 0;
+        z-index: 10001;
+    }
+
+    .livestream-event-info {
+        position: absolute;
+        top: 87px;
+        left: 10px;
+        color: white !important;
+        font-family: Arial, sans-serif !important;
+        font-size: 30px !important;
+        font-weight: 700 !important;
+        margin: 0;
+        padding: 0;
+        z-index: 10001;
+        transition: opacity 0.3s ease;
+    }
+
+    .livestream-headers {
+        position: absolute;
+        top: 135px;
+        left: 32px;
+        right: 32px;
+        display: flex;
+        align-items: center;
+        color: white !important;
+        font-family: Arial, sans-serif !important;
+        font-size: 30px !important;
+        font-weight: 700 !important;
+        margin: 0;
+        padding: 0;
+        z-index: 10001;
+        transition: opacity 0.3s ease;
+    }
+
+    .livestream-header-lane {
+        width: 50px;
+        color: white !important;
+    }
+
+    .livestream-header-name {
+        width: 450px;
+        color: white !important;
+        margin-left: 20px;
+    }
+
+    .livestream-header-club {
+        flex: 1;
+        color: white !important;
+        margin-left: 200px;
+    }
+
+    .livestream-header-time {
+        width: 120px;
+        text-align: center;
+        color: white !important;
+        margin-right: 60px;
+    }
+
+    .livestream-header-place {
+        width: 80px;
+        text-align: center;
+        color: white !important;
+    }
+
+    .livestream-header-lp {
+        width: 80px;
+        text-align: center;
+        color: white !important;
+    }
+
+    .livestream-row {
+        position: absolute;
+        left: 32px;
+        right: 32px;
+        display: flex;
+        align-items: center;
+        color: white !important;
+        font-family: Arial, sans-serif !important;
+        font-size: 30px !important;
+        font-weight: 700 !important;
+        margin: 0;
+        padding: 0;
+        z-index: 10001;
+        transition: opacity 0.3s ease;
+    }
+
+    .livestream-row-lane {
+        width: 50px;
+        color: white !important;
+    }
+
+    .livestream-row-name {
+        width: 450px;
+        color: white !important;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        margin-left: 20px;
+        transition: opacity 0.3s ease;
+    }
+
+    .livestream-row-club {
+        flex: 1;
+        color: white !important;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        padding-right: 20px;
+        margin-left: 200px;
+        transition: opacity 0.3s ease;
+    }
+
+    .livestream-row-time {
+        width: 120px;
+        text-align: center;
+        color: white !important;
+        margin-right: 60px;
+        transition: opacity 0.3s ease, color 0.3s ease;
+    }
+
+    .livestream-row-time.dq {
+        color: #ff4444 !important;
+    }
+
+    .livestream-row-place {
+        width: 80px;
+        text-align: center;
+        color: white !important;
+        transition: opacity 0.3s ease;
+    }
+
+    .livestream-row-lp {
+        width: 80px;
+        text-align: center;
+        color: white !important;
+        transition: opacity 0.3s ease;
+    }
+	
+	/* --- MEDAL BANNERS --- */
+    .livestream-row.medal-gold {
+        background-color: rgba(255, 215, 0, 0.4); /* Gold with transparency */
+        box-shadow: 0 0 10px rgba(255, 215, 0, 0.8);
+    }
+    
+    .livestream-row.medal-silver {
+        background-color: rgba(192, 192, 192, 0.4); /* Silver with transparency */
+        box-shadow: 0 0 10px rgba(192, 192, 192, 0.8);
+    }
+    
+    .livestream-row.medal-bronze {
+        background-color: rgba(205, 127, 50, 0.4); /* Bronze with transparency */
+        box-shadow: 0 0 10px rgba(205, 127, 50, 0.8);
+    }
+    
+    /* Ensure all text fields within the row are covered by the color transition */
+    .livestream-row {
+        transition: background-color 0.4s ease, box-shadow 0.4s ease;
+    }
+
+    .livestream-fullscreen-view.active {
+        display: block;
+    }
+
+    @keyframes livestreamGradientFlow {
+        0% {
+            background-position: 0% 50%;
+        }
+        50% {
+            background-position: 100% 50%;
+        }
+        100% {
+            background-position: 0% 50%;
+        }
+    }
+
+    @keyframes fadeIn {
+        from {
+            opacity: 0;
+        }
+        to {
+            opacity: 1;
+        }
+    }
+
+    .fade-in {
+        animation: fadeIn 0.3s ease;
+    }
+
+    .updating {
+        opacity: 0.5;
+        transition: opacity 0.2s ease;
+    }
+</style>
+
+<div id="livestream-wrapper">
+    <div class="livestream-login-container" id="livestreamLoginContainer">
+        <h1>Live Stream Access</h1>
+        <form id="livestreamLoginForm" onsubmit="return false;">
+            <div class="livestream-form-group">
+                <label for="livestreamUsername">Username</label>
+                <input type="text" id="livestreamUsername" name="username" required autocomplete="username">
+            </div>
+            <div class="livestream-form-group">
+                <label for="livestreamPassword">Password</label>
+                <div class="livestream-password-container">
+                    <input type="password" id="livestreamPassword" name="password" required autocomplete="current-password">
+                    <button type="button" class="livestream-toggle-password" id="livestreamTogglePassword">Show</button>
+                </div>
+            </div>
+            <button type="button" class="livestream-submit-btn" id="livestreamSubmitBtn">Login</button>
+            <div class="livestream-error-message" id="livestreamErrorMessage">Invalid username or password</div>
+        </form>
+    </div>
+
+    <div class="livestream-fullscreen-view" id="livestreamFullscreenView">
+        <h1 class="livestream-gala-title">Carnforth Otters Gala</h1>
+        <p class="livestream-event-info" id="livestreamEventInfo">Event 522 Open/Male 200m Butterfly</p>
+        
+        <div class="livestream-headers" id="livestreamHeaders">
+            <span class="livestream-header-lane">L</span>
+            <span class="livestream-header-name">Name</span>
+            <span class="livestream-header-club">Club</span>
+            <span class="livestream-header-time">Time</span>
+            <span class="livestream-header-place">P</span>
+            <span class="livestream-header-lp">Lp</span>
+        </div>
+
+        <div class="livestream-row" style="top: 180px;" data-lane="1">
+            <span class="livestream-row-lane">1</span>
+            <span class="livestream-row-name" data-field="name"></span>
+            <span class="livestream-row-club" data-field="club"></span>
+            <span class="livestream-row-time" data-field="time"></span>
+            <span class="livestream-row-place" data-field="place"></span>
+            <span class="livestream-row-lp" data-field="lp"></span>
+        </div>
+
+        <div class="livestream-row" style="top: 230px;" data-lane="2">
+            <span class="livestream-row-lane">2</span>
+            <span class="livestream-row-name" data-field="name"></span>
+            <span class="livestream-row-club" data-field="club"></span>
+            <span class="livestream-row-time" data-field="time"></span>
+            <span class="livestream-row-place" data-field="place"></span>
+            <span class="livestream-row-lp" data-field="lp"></span>
+        </div>
+
+        <div class="livestream-row" style="top: 280px;" data-lane="3">
+            <span class="livestream-row-lane">3</span>
+            <span class="livestream-row-name" data-field="name"></span>
+            <span class="livestream-row-club" data-field="club"></span>
+            <span class="livestream-row-time" data-field="time"></span>
+            <span class="livestream-row-place" data-field="place"></span>
+            <span class="livestream-row-lp" data-field="lp"></span>
+        </div>
+
+        <div class="livestream-row" style="top: 330px;" data-lane="4">
+            <span class="livestream-row-lane">4</span>
+            <span class="livestream-row-name" data-field="name"></span>
+            <span class="livestream-row-club" data-field="club"></span>
+            <span class="livestream-row-time" data-field="time"></span>
+            <span class="livestream-row-place" data-field="place"></span>
+            <span class="livestream-row-lp" data-field="lp"></span>
+        </div>
+
+        <div class="livestream-row" style="top: 380px;" data-lane="5">
+            <span class="livestream-row-lane">5</span>
+            <span class="livestream-row-name" data-field="name"></span>
+            <span class="livestream-row-club" data-field="club"></span>
+            <span class="livestream-row-time" data-field="time"></span>
+            <span class="livestream-row-place" data-field="place"></span>
+            <span class="livestream-row-lp" data-field="lp"></span>
+        </div>
+
+        <div class="livestream-row" style="top: 430px;" data-lane="6">
+            <span class="livestream-row-lane">6</span>
+            <span class="livestream-row-name" data-field="name"></span>
+            <span class="livestream-row-club" data-field="club"></span>
+            <span class="livestream-row-time" data-field="time"></span>
+            <span class="livestream-row-place" data-field="place"></span>
+            <span class="livestream-row-lp" data-field="lp"></span>
+        </div>
+
+        <div class="livestream-row" style="top: 480px;" data-lane="7">
+            <span class="livestream-row-lane">7</span>
+            <span class="livestream-row-name" data-field="name"></span>
+            <span class="livestream-row-club" data-field="club"></span>
+            <span class="livestream-row-time" data-field="time"></span>
+            <span class="livestream-row-place" data-field="place"></span>
+            <span class="livestream-row-lp" data-field="lp"></span>
+        </div>
+
+        <div class="livestream-row" style="top: 530px;" data-lane="8">
+            <span class="livestream-row-lane">8</span>
+            <span class="livestream-row-name" data-field="name"></span>
+            <span class="livestream-row-club" data-field="club"></span>
+            <span class="livestream-row-time" data-field="time"></span>
+            <span class="livestream-row-place" data-field="place"></span>
+            <span class="livestream-row-lp" data-field="lp"></span>
+        </div>
+    </div>
+</div>
+
+<script>
+(function() {
+    // Login functionality
+    const togglePassword = document.getElementById('livestreamTogglePassword');
+    const passwordInput = document.getElementById('livestreamPassword');
+    const submitBtn = document.getElementById('livestreamSubmitBtn');
+    const errorMessage = document.getElementById('livestreamErrorMessage');
+    const loginContainer = document.getElementById('livestreamLoginContainer');
+    const fullscreenView = document.getElementById('livestreamFullscreenView');
+	const CLUB_MAPPING = {
+    'TENS': '1066 Swimmers',
+    'ENTX': '1930 ASC',
+    'FRSS': '4 Shires Swimming Club',
+    'ANTW': 'A.N.T. Swimming Club Of Somerset',
+    'ABVY': 'Aberavon Swimming Club',
+    'ACDY': 'Aberdare Comets Diving Club',
+    'NANX': 'Aberdeen ASC',
+    'NAVX': 'Aberdeen Diving Club',
+    'NADX': 'Aberdeen Dolphins ASC',
+    'NABX': 'Aberdeen University Diving Club',
+    'NAUX': 'Aberdeen University Swimming and WPC',
+    'ABAY': 'Abergavenny Swimming Club',
+    'ABTY': 'Abertillery Piranhas Swimming Club',
+    'ABRY': 'Aberystwyth and District Swimming Club',
+    'ABIS': 'Abingdon Vale SC',
+    'ACEL': 'AC East London',
+    'ASBW': 'Academy Swim Team Burnham',
+    'ACCN': 'Accrington SC',
+    'ADWE': 'Adwick (Doncaster) SC',
+    'AVSY': 'Afan Valley Swimming Club',
+    'WAMX': 'Airdrie and Monkland ASC',
+    'AIRE': 'Aireborough SC',
+    'ALBS': 'Albatross DC',
+    'NAOX': 'Alford Otters ASC',
+    'ALFA': 'Alfreton Swimming Club',
+    'WAAX': 'Alloa ASC',
+    'ALNE': 'Alnwick Dolphin SC',
+    'ALSN': 'Alsager SC',
+    'ALTS': 'Alton & District Swimming Club',
+    'ALTN': 'Altrincham SC',
+    'AMES': 'Amersham SC',
+    'AMMY': 'Amman Valley Swimming Club',
+    'ANCL': 'Anaconda SC',
+    'ANDS': 'Andover Swimming & WP Club',
+    'WANX': 'Annan ASC',
+    'APWS': 'Applemore and Waterside SC',
+    'AFHE': 'Aqua Force Swimming Academy Hartlepool',
+    'ROCN': 'Aquabears Of Rochdale SC',
+    'AJNE': 'AquaJets Newcastle SC',
+    'AQUT': 'Aqualina (Stevenage) Artistic Swimming Club',
+    'AASS': 'Aquaoaks Artistic Swimming Club (Sevenoaks)',
+    'AQNL': 'Aquavision North London Swim Club',
+    'ARFY': 'Arfon Swimming Club',
+    'UACX': 'Argyll & Clyde Swim Team',
+    'EABX': 'Armadale Barracudas ASC',
+    'ARME': 'Armthorpe & District SC',
+    'ARNA': 'Arnold SC',
+    'ARTS': 'Arun Tridents SC',
+    'TESQ': 'ASA Live Test Club',
+    'ATEA': 'Asa Temporary cat 2 club',
+    'ASRS': 'Ascot Royals Swim Club',
+    'ASHA': 'Ashbourne & District SC',
+    'ASFS': 'Ashford School',
+    'ASHS': 'Ashford Town SC',
+    'ASHE': 'Ashington SC',
+    'ASHN': 'Ashton Central SC',
+    'AULN': 'Ashton-Under-Lyne SC',
+    'SPAE': 'Askern Spa ASC',
+    'ASTM': 'Aston (Birmingham) SC',
+    'ATHN': 'Atherton and Leigh ASC',
+    'ATLS': 'Atlantis Swimming Club',
+    'AVOL': 'Avondale SC',
+    'AYBS': 'Aylesbury & District SC',
+    'WARX': 'Ayr Diving Club',
+    'BACW': 'Backwell SC',
+    'BACA': 'Bakewell Swimming Club',
+    'WBBX': 'Balfron Barracudas',
+    'BANS': 'Banbury SC',
+    'NBBX': 'Banchory Beavers ASC',
+    'NBMX': 'Banff and Buchan Masters',
+    'BBDY': 'Bangor Diving Club',
+    'BACL': 'Barking & Dagenham Aquatics Club',
+    'SPAL': 'Barnes SC',
+    'BANL': 'Barnet Copthall SC',
+    'BWCL': 'Barnet Water Polo Club',
+    'BARE': 'Barnsley SC',
+    'BARW': 'Barnstaple SC',
+    'BARN': 'Barrow ASC',
+    'BARY': 'Barry Swimming Club',
+    'BAST': 'Basildon and Phoenix SC',
+    'BBFS': 'Basingstoke Bluefins SC',
+    'BSSA': 'Bassetlaw Swim Squad',
+    'BJSS': 'Bassett J.S.F. Swimming Club',
+    'BADW': 'Bath Dolphin SC',
+    'BATI': 'Bath Performance Centre',
+    'EBEX': 'Bathgate ASC',
+    'BFDS': 'Beachfield Swimming Squad',
+    'BCNS': 'Beacon SC',
+    'BEAS': 'Beau Sejour Barracuda SC',
+    'BEVT': 'Beavers Masters Bedford SC',
+    'BEBN': 'Bebington SC',
+    'BEKL': 'Beckenham SC',
+    'MODT': 'Bedford Swim Squad',
+    'BEPT': 'Bedford Water Polo Club',
+    'WBLX': 'Bellshill Sharks ASC',
+    'BEMA': 'Belper Marlin Swimming Club',
+    'BERW': 'Bere Regis & District SC',
+    'BKHT': 'Berkhamsted SC',
+    'BSBS': 'Berkshire & S Bucks ASA',
+    'BEGL': 'Bethnal Green SC',
+    'BEBE': 'Beverley Barracudas SC',
+    'BXHS': 'Bexhill SC',
+    'BEML': 'Bexley Masters SC',
+    'BEXL': 'Bexley SC',
+    'BXPS': 'Bexley Water Polo Club (Swanley)',
+    'BCCS': 'Bicester Blue Fins SC',
+    'BIDM': 'Biddulph SC',
+    'BWPT': 'Biggleswade SC',
+    'BILE': 'Billingham Forum SC',
+    'BILM': 'Bilston SC',
+    'SNPA': 'Bingham Penguins SC',
+    'BIGE': 'Bingley SC',
+    'BICA': 'Bircotes SC',
+    'BKDN': 'Birkenhead SC',
+    'BMSM': 'Birmingham Marlins Swimming Club',
+    'BIRM': 'Birmingham Masters',
+    'BIRE': 'Birtley SC',
+    'BIST': 'Bishops Stortford SC',
+    'BSAS': 'Bishops Waltham Mitres SwimClub',
+    'BATL': 'BJSC Tooting',
+    'BCPM': 'Black Country n Potteries Masters SC',
+    'BLAS': 'Black Lion SC',
+    'BLCN': 'Blackburn Centurion SC',
+    'BAQN': 'Blackpool Aquatics ASC',
+    'MBEX': 'Blairgowrie ASC',
+    'BLFW': 'Blandford SC',
+    'WBEX': 'Blantyre ASC',
+    'BLAE': 'Blaydon & District SC',
+    'BAES': 'Bletchley and District SC',
+    'BMAS': 'Blue Marlins Water Polo Club',
+    'BLYE': 'Blyth Lifeguard & Swimming Club',
+    'BBSM': 'Blythe Barracudas SC',
+    'WBSX': 'Bo\'ness ASC',
+    'BLDM': 'Boldmere Swimming and Water Polo Club',
+    'BOLE': 'Boldon C.A. Swim Club',
+    'BTMN': 'Bolton Metro Swimming Squad',
+    'BLNN': 'Bolton SC',
+    'NBAX': 'Bon Accord Thistle ASC',
+    'BNLN': 'Bootle & North Liverpool SC',
+    'BWFL': 'Bor of Waltham Forest (Gators)',
+    'UBEX': 'Borders Elite Swim Team',
+    'BORE': 'Borocuda Teesside ASC',
+    'BAME': 'Borough of Barnsley SC',
+    'BBST': 'Borough of Broxbourne Swim Squad',
+    'HAWL': 'Borough of Harrow S C',
+    'BOKE': 'Borough of Kirklees SC',
+    'BOST': 'Borough of Southend Swimming and Training Club',
+    'BOSE': 'Borough Of Stockton Swim Scheme',
+    'BOSA': 'Boston Amateur SC',
+    'BOTT': 'Bottisham SC',
+    'BORS': 'Bourne End SC',
+    'BCSW': 'Bournemouth Collegiate School SC',
+    'BTHW': 'Bournemouth SC',
+    'BOXS': 'Box Hill SC',
+    'BSCA': 'Brackley Swimming Club',
+    'BRKS': 'Bracknell & Wokingham SC',
+    'BDSE': 'Bradford Dolphin SC',
+    'BGSE': 'Bradford Grammar School Swimming Club',
+    'BRAE': 'Bradford SC',
+    'BOAW': 'Bradford-On-Avon ASC',
+    'BTRT': 'Braintree & Bocking SC',
+    'BRMA': 'Bramcote Swimming Club',
+    'BSTA': 'Braunstone SC',
+    'MBBX': 'Brechin Beavers ASC',
+    'BREY': 'Brecon Swimming Club',
+    'BOBL': 'Brent Dolphins SC',
+    'BART': 'Brentwood Artistic Swimming Club',
+    'BRET': 'Brentwood SC',
+    'NBDX': 'Bridge of Don ASC',
+    'BRIN': 'Bridgefield SC',
+    'BFWN': 'Bridgefield Water Polo Club',
+    'BRCY': 'Bridgend County Swim Squad',
+    'BSCY': 'Bridgend Swim Club',
+    'BRIW': 'Bridgwater Amateur Swimming Club',
+    'BRDE': 'Bridlington SC',
+    'BBAW': 'Bridport Barracuda',
+    'BRGE': 'Brighouse SC',
+    'BCSS': 'Brighton College Swimming Club',
+    'BRDS': 'Brighton Dolphin SC',
+    'BSGW': 'Bristol and South Gloucestershire Swimming Club',
+    'BRHW': 'Bristol Henleaze SC',
+    'BRNW': 'Bristol North SC',
+    'BRAS': 'British Army',
+    'BRXW': 'Brixham SC',
+    'BSLS': 'Broadstairs Lifeguard & SC',
+    'BRDM': 'Broadway (Walsall)',
+    'BRON': 'Broadway SC (North)',
+    'NBHX': 'Broch SC',
+    'BDAT': 'Brocket (Hatfield) Diving Academy',
+    'BROW': 'Brockworth Swimming Club',
+    'BRYL': 'Bromley SC',
+    'BRBL': 'Brompton SC',
+    'BROM': 'Bromsgrove SC',
+    'BROL': 'Broomfield Park SC',
+    'BRBT': 'Broxbourne SC',
+    'EBNX': 'Broxburn & District ASC',
+    'NBKX': 'Buckie ASC',
+    'BUCS': 'Buckingham Swans',
+    'BUCY': 'Buckley Swimming Club',
+    'NBNX': 'Bucksburn ASC',
+    'BUCL': 'BUCS',
+    'BUDW': 'Bude Sharks',
+    'BOSW': 'Burnham-on-Sea SC',
+    'BUBN': 'Burnley BOBCATS ADM SC',
+    'EBDX': 'Burntisland ASC',
+    'BRWM': 'Burntwood Swimming Club',
+    'BDCN': 'Burscough Diving Club',
+    'BURM': 'Burton Amateur SC',
+    'BRYN': 'Bury and Elton SC',
+    'BWPN': 'Bury Water Polo Club',
+    'BUST': 'Bushey Amateur Swimming Club',
+    'BUXA': 'Buxton & District SC',
+    'CAPY': 'Caerphilly County Swim Squad',
+    'CALY': 'Caldicot Swimming Club',
+    'UCDX': 'Caledonia',
+    'USCX': 'Caledonia Synchro',
+    'CMIL': 'Cally Masters Islington',
+    'CAFW': 'Calne Alpha Four ASC',
+    'CALA': 'Calverton and Bingham SC',
+    'CAAY': 'Cambrian Aquatics Academy',
+    'CDTT': 'Cambridge Dive Team',
+    'CAUT': 'Cambridge University Swimming & Water Polo Club',
+    'CSCL': 'Camden Swiss Cottage SC',
+    'CAMW': 'Camelford Stingers',
+    'CHEM': 'Camp Hill Edwardians SC',
+    'CAHM': 'Camp Hill SC',
+    'PHYM': 'Cannock Phoenix Swimming Club',
+    'CNVT': 'Canvey Island SC',
+    'CRNW': 'Caradon SC',
+    'ECNX': 'Cardenden ASC',
+    'CDMY': 'Cardiff Masters Swimming Club',
+    'CMUY': 'Cardiff Metropolitan University',
+    'CSCY': 'Cardigan Swimming Club - Clwb Nofio Aberteifi',
+    'CAQN': 'Carlisle Aquatics',
+    'CARA': 'Carlton Forum SC',
+    'CAMY': 'Carmarthen & District Swimming Club',
+    'CWPY': 'Carmarthen Water Polo Club',
+    'CMMY': 'Carmarthenshire Masters Swimming Club',
+    'CARW': 'Carn Brea and Helston SC',
+    'ECEX': 'Carnegie ASC',
+    'CDON': 'Carnforth & Dist Otters',
+    'MCCX': 'Carnoustie Claymores',
+    'CMAW': 'Carrick Masters',
+    'CWPE': 'Castleford WPC',
+    'CAWS': 'Cawpra SC',
+    'CEDY': 'Celtic Dolphins Swimming Club',
+    'CHAN': 'Chadderton SC',
+    'CHAS': 'Chalfont Otters SC',
+    'CHPE': 'Chapeltown SC',
+    'CHSM': 'Chase SC',
+    'CSDM': 'Cheadle (Staffs) & District',
+    'CHLL': 'Cheam Marcuda SC',
+    'CHDW': 'Cheddar Kingfishers SC',
+    'CHET': 'Chelmsford City SC',
+    'CWSL': 'Chelsea & Westminster SC',
+    'CASW': 'Cheltenham Artistic Swimming Club',
+    'CPAW': 'Cheltenham Phoenix Aquatics Club',
+    'CHEW': 'Cheltenham S & W P Club',
+    'CHEY': 'Chepstow & District Swimming Club',
+    'CHMS': 'Chesham SC',
+    'CHRN': 'Cheshire County WPSA',
+    'CHST': 'Cheshunt Swimming Club',
+    'CLSE': 'Chester-Le-Street SC',
+    'CFDA': 'Chesterfield Swimming Club',
+    'CHIS': 'Chichester (Cormorant) SC',
+    'CHIW': 'Chippenham ASC',
+    'CHIY': 'Chirk Dragons Swimming Club',
+    'CMSL': 'Chislehurst Millennium Swim Squad',
+    'CHML': 'Chiswick Masters',
+    'CMAN': 'Chorley Marlins SC',
+    'CIRW': 'Cirencester SC',
+    'CWPL': 'Citizens Water Polo Club',
+    'BHMM': 'City of Birmingham SC',
+    'CBEE': 'City of Bradford Esprit Diving',
+    'COBE': 'City of Bradford SC',
+    'BRIS': 'City of Brighton and Hove',
+    'COBW': 'City of Bristol SC',
+    'CAMT': 'City of Cambridge SC',
+    'CANS': 'City of Canterbury SC',
+    'COCY': 'City of Cardiff',
+    'COCN': 'City of Chester Swimming Club',
+    'COVM': 'City of Coventry SC',
+    'DMRE': 'City of Doncaster Masters Swim Squad',
+    'ELYT': 'City Of Ely Amateur Swimming Club',
+    'WCGX': 'City Of Glasgow Swim Team',
+    'HERM': 'City of Hereford SC',
+    'LDCE': 'City of Leeds Diving Club',
+    'LDSE': 'City of Leeds SC',
+    'LSYE': 'City Of Leeds Synchronised SC',
+    'CLWE': 'City of Leeds Water Polo Club',
+    'COLA': 'City of Leicester SC',
+    'CLPA': 'City of Linc Pentaqua SC',
+    'LPLN': 'City of Liverpool SC',
+    'MANN': 'City of Manchester Aquatics',
+    'CMWN': 'City of Manchester WPC',
+    'CMKS': 'City Of Milton Keynes',
+    'NWMY': 'City Of Newport Swimming & Water Polo Club',
+    'NORT': 'City of Norwich SC',
+    'OXFS': 'City Of Oxford SC',
+    'COWS': 'City Of Oxford Water Polo Club',
+    'PETT': 'City Of Peterborough SC',
+    'CPAN': 'City of Preston Aquatics SC',
+    'SAFN': 'City of Salford SC',
+    'CSAN': 'City of Salford Synchronised Swimming Club',
+    'SHDE': 'City of Sheffield Diving Club',
+    'COSE': 'City of Sheffield Swim Squad Ltd',
+    'SWPE': 'City of Sheffield WPC',
+    'COSS': 'City of Southampton SC',
+    'SOST': 'City of Southend on Sea SC',
+    'SAST': 'City of St Albans SC',
+    'CITM': 'City of Stoke SC (Cosacss)',
+    'SUNE': 'City of Sunderland ASC',
+    'SWAY': 'City of Swansea Aquatics Club',
+    'WAKE': 'City of Wakefield SC',
+    'CLAT': 'Clacton Swimming Club',
+    'CLDE': 'Cleethorpes & Dist SC',
+    'CLEW': 'Clevedon SC',
+    'CLIN': 'Clitheroe Dolphins SC',
+    'BANY': 'Clwb Nofio Bangor Swim Club',
+    'CANY': 'Clwb Nofio Caernarfon',
+    'PBPY': 'Clwb Nofio P.B.P.',
+    'IOAY': 'Clwb Nofio Ynys Mon | Isle of Anglesey Swimming Club',
+    'WCKX': 'Clydebank ASC',
+    'COAA': 'Coalville SC',
+    'COKN': 'Cockermouth SC',
+    'COPT': 'Colchester Phoenix ASC',
+    'COLT': 'Colchester Swimming & Water Polo Club',
+    'COLN': 'Colne SC',
+    'CONY': 'Connahs Quay Swimming Club',
+    'CONE': 'Consett SC',
+    'COPN': 'Copeland ASC',
+    'CORA': 'Corby ASC',
+    'CSDA': 'Corby Steel Diving',
+    'CWLW': 'Cornwall ASA',
+    'CORW': 'Corsham A.S.C.',
+    'CSHY': 'Corwen Sharks Swimming Club',
+    'CRAS': 'Cranleigh SC',
+    'CRWS': 'Crawley SC',
+    'CREW': 'Crediton & District SC',
+    'CREN': 'Crewe Flyers SC',
+    'CRON': 'Crosby SC',
+    'CROL': 'Croydon Amphibians SC',
+    'CPML': 'Crystal Palace Masters Swimming Club',
+    'NCOX': 'Cults Otters ASC',
+    'WCDX': 'Cumbernauld ASC',
+    'CUMN': 'Cumbria ASA',
+    'ECRX': 'Cupar and District Swimming Club',
+    'CDWY': 'Cwm Draig Water Polo Club',
+    'CWMY': 'Cwmbran Swimming Club',
+    'DAST': 'Dacorum Artistic SC',
+    'SADT': 'Dacorum Diving Club',
+    'DDME': 'Darlington Dolphin Masters SC',
+    'DARE': 'Darlington SC',
+    'DARS': 'Dartford District SC',
+    'DSCW': 'Dartmouth Swimming Club',
+    'DMAN': 'Darwen Masters Swimming Club',
+    'DAVA': 'Daventry Dolphins SC',
+    'DAWW': 'Dawlish SC',
+    'DTRS': 'Deal Tri Masters Swim Club',
+    'DCME': 'Dearne Valley SC',
+    'DEBT': 'Deben SC',
+    'DEEA': 'Deepings SC',
+    'NDDX': 'Delting Dolphins ASC',
+    'DENY': 'Denbigh Dragons Swim Club',
+    'DDTY': 'Denbighshire Development Team',
+    'DSSN': 'Denton Artistic Swimming Club',
+    'DEXA': 'Derby Excel Swimming Club',
+    'DEPA': 'Derby Phoenix SC',
+    'DRBA': 'Derbyshire ASA',
+    'DADT': 'Dereham & District ASC',
+    'DEVE': 'Derwent Valley SC',
+    'DAGE': 'Derwentside & Gateshead Swim Team',
+    'NDNX': 'Deveron ASC',
+    'DEVW': 'Devizes ASC',
+    'DVNW': 'Devon County ASA',
+    'DERW': 'Devonport RSA',
+    'DBYE': 'Dewsbury SC',
+    'DABS': 'Didcot & Barramundi SC',
+    'NDIX': 'Dingwall ASC',
+    'DINW': 'Dinnaton SC',
+    'DOTT': 'Diss Otters SC',
+    'DLAL': 'Dive London Aquatics Club',
+    'DODE': 'Doncaster Dartes SC',
+    'DORS': 'Dorking Swimming Club',
+    'DRSW': 'Dorset County ASA',
+    'DOUN': 'Douglas SC',
+    'DOVM': 'Dove Valley SC',
+    'DLCS': 'Dover Lifeguard Swimming Club',
+    'DSST': 'Down Syndrome Swimming Great Britain',
+    'DFDE': 'Driffield SC',
+    'DTDM': 'Droitwich Dolphins SC',
+    'DRDA': 'Dronfield Dolphins SC',
+    'DTSW': 'DTs',
+    'DUKN': 'Dukinfield Marlins ASC',
+    'DUDL': 'Dulwich Dolphins',
+    'WDSX': 'Dumfries ASC',
+    'MDCX': 'Dundee City Aquatics SC',
+    'MDDX': 'Dundee Diving',
+    'MDUX': 'Dundee University Swimming & WPC',
+    'EDDX': 'Dunedin Swim Team',
+    'EDEX': 'Dunfermline ASC',
+    'EDUX': 'Dunfermline Water Polo Club',
+    'DUAT': 'Dunmow Atlantis SC',
+    'WDNX': 'Dunoon ASC',
+    'EDSX': 'Duns ASC',
+    'DUBT': 'Dunstable SC',
+    'DUWT': 'Dunstable Water Polo Club',
+    'DURE': 'Durham City ASC',
+    'DURW': 'Durrington Otters',
+    'DDOW': 'Dursley Dolphins',
+    'NDAX': 'Dyce (Aberdeen) ASC',
+    'EALL': 'Ealing SC',
+    'EANT': 'East Anglian Swallow Tails',
+    'EAGS': 'East Grinstead Swimming Club',
+    'EIES': 'East Invicta eXcel',
+    'WEKX': 'East Kilbride ASC',
+    'ELEE': 'East Leeds SC',
+    'UELX': 'East Lothian Swim Team',
+    'MLDA': 'East Midland Region',
+    'EAST': 'East Region',
+    'NESX': 'East Sutherland Swimming Club',
+    'EASS': 'Eastbourne SC',
+    'EOTL': 'Eastern Otters Water Polo Club',
+    'EATS': 'Eastleigh SC',
+    'EASL': 'Eaton Square SC',
+    'ECKA': 'Eckington SC',
+    'EDPS': 'Edenbridge Piranhas SC',
+    'EEDX': 'Edinburgh Diving Club',
+    'EESX': 'Edinburgh Synchro ASC',
+    'EEUX': 'Edinburgh University',
+    'EDLE': 'Edlington SC',
+    'EEWS': 'Electric Eels of Windsor SC',
+    'NENX': 'Elgin SC',
+    'ECSM': 'Ellesmere College Swimming Academy',
+    'ELLN': 'Ellesmere Port SC',
+    'ELMS': 'Elmbridge Phoenix SC',
+    'EMSL': 'Eltham Stingrays',
+    'WEAX': 'Enable Arion SC',
+    'ENSL': 'Enfield Swim Squad',
+    'ERME': 'English Roses Masters WPC',
+    'EPPT': 'Epping Forest Dist SC',
+    'EPSS': 'Epsom District SC',
+    'ERIL': 'Erith & District SC',
+    'ESTE': 'Eston SC',
+    'ETEA': 'Etwall Eagles SC',
+    'EVEN': 'Everton Swimming Assoc',
+    'EVEM': 'Evesham SC',
+    'EMAW': 'Exe Masters Swimming Club',
+    'EXCW': 'Exeter City Swimming Club',
+    'EUAW': 'Exeter University Alumni Swimming Club',
+    'ECWW': 'Exeter University Water Polo Club',
+    'EXEW': 'Exeter Waterpolo & Swimming Club',
+    'EXMW': 'Exmouth Swimming Club',
+    'EEHX': 'Eyemouth & District ASC',
+    'UFTX': 'Falkirk Inter-Region Swim Team',
+    'WFOX': 'Falkirk Otters ASC',
+    'FANS': 'Fareham Nomads SC',
+    'FARS': 'Farnham SC',
+    'EFPX': 'Fauldhouse Penguins SC',
+    'FAVS': 'Faversham SC',
+    'FLXT': 'Felixstowe SC',
+    'FELL': 'Feltham SC',
+    'EFAX': 'Ferry Amateur Swim Team',
+    'UFNX': 'Fife North East Swim Team',
+    'EFEX': 'Fife Synchronised Swimming Club',
+    'EFSX': 'Fins CSC',
+    'FISY': 'Fishguard Flyers Swimming Club',
+    'FLEN': 'Fleetwood Mako\'s',
+    'FLIY': 'Flint Swimming Club',
+    'MBDT': 'Flitwick Dolphins SC',
+    'FSTN': 'Flixton SC',
+    'FOLS': 'Folkestone SC',
+    'FODW': 'Forest of Dean SC',
+    'MFRX': 'Forfar ASC',
+    'FSCN': 'Formby Swimming Club',
+    'NFBX': 'Forres Blu Fins ASC',
+    'WFTX': 'Forth Valley Tridents',
+    'WFVX': 'Forth Valley WPC',
+    'FORL': 'Forward Hillingdon Squad',
+    'NFSX': 'Free Style SC',
+    'FMSL': 'Frognal Masters Swimming Club',
+    'FROW': 'Frome SC',
+    'GRDA': 'Gainsborough Dolphins SC',
+    'EGAX': 'Galashiels ASC',
+    'NGHX': 'Garioch ASC',
+    'GTGN': 'Garstang SC',
+    'GARN': 'Garston SC',
+    'GHSE': 'Gateshead Artistic Swimming Club',
+    'GGEY': 'Gele Gators Swimming Club',
+    'WNSX': 'Glasgow Nomads SC',
+    'WGUX': 'Glasgow University Swim Team',
+    'WWMX': 'Glasgow Western Masters ASC',
+    'EGSX': 'Glenrothes ASC',
+    'GLOA': 'Glossop ASC',
+    'GLUW': 'Gloucester ASA',
+    'GLOW': 'Gloucester City SC',
+    'GLMW': 'Gloucester Masters SC',
+    'GODS': 'Godalming ASC',
+    'GOSS': 'Gosport Dolphins SC',
+    'WGHX': 'Grangemouth ASC',
+    'GRNA': 'Grantham SC',
+    'KWPA': 'Grantham Water Polo Club',
+    'NGRX': 'Grantown-on-Spey SC',
+    'GRAS': 'Gravesend & Northfleet SC',
+    'BODS': 'Great Britain Deaf Swimming Club',
+    'GBPE': 'Great Britain Police',
+    'GHON': 'Great Harwood Otters SC',
+    'GYAT': 'Great Yarmouth SC',
+    'GASA': 'Green Arrows SSC',
+    'GWRL': 'Greenwich Royals SC',
+    'EGEX': 'Grove ASC',
+    'GUES': 'Guernsey Swimming Club',
+    'GWPS': 'Guernsey Water Polo LBG',
+    'GUIS': 'Guildford City Swimming Club',
+    'CRNS': 'Guildford Water Polo Club',
+    'GUIE': 'Guisborough SC',
+    'HAGL': 'Hackney Anaconda',
+    'EHNX': 'Haddington & District ASC',
+    'HADT': 'Hadleigh and Sudbury Swimming Club',
+    'EHAX': 'Hailes ASC',
+    'HAIS': 'Hailsham SC',
+    'HALM': 'Halesowen SC',
+    'HSWT': 'Halesworth & District SC',
+    'HALE': 'Halifax SC',
+    'HAST': 'Halstead Swimming Club',
+    'WIDN': 'Halton SC',
+    'HAQS': 'Hamble Aquatics Swim Team',
+    'HASE': 'Hambleton Swim Squad',
+    'WHBX': 'Hamilton Baths ASC',
+    'WHNX': 'Hamilton Dolphins',
+    'WHWX': 'Hamilton Water Polo Club',
+    'HNTS': 'Hampshire County ASA',
+    'HGSM': 'Handsworth Grammar Sch Old Boys',
+    'HABL': 'Haringey Aquatics',
+    'HALT': 'Harlow Penguin SC',
+    'HRPT': 'Harpenden Swimming Club',
+    'HARN': 'Harpurhey SC',
+    'HARE': 'Harrogate District SC',
+    'HDCE': 'Harrogate Diving Club',
+    'HRWL': 'Harrow Scout & Guide SC',
+    'HARS': 'Hart Swimming Club',
+    'HATE': 'Hartlepool SC',
+    'HDPT': 'Harwich Dovercourt/Parkeston SC',
+    'HSMS': 'Haslemere Swimming Club',
+    'HSGS': 'Hastings Seagull SC',
+    'HATT': 'Hatfield SC',
+    'HVWS': 'Havant & Waterlooville SC',
+    'HAVY': 'Haverfordwest Swimming Club',
+    'ECDL': 'Havering Cormorants Diving Club',
+    'EHTX': 'Hawick & Teviotdale ASC',
+    'HAZN': 'Hazel Gr/Bramhall (Saracens) SC',
+    'HOVY': 'Heads of the Valleys Swimming Club',
+    'EHMX': 'Heart Of Midlothian ASC',
+    'HTHM': 'Heath Town SC',
+    'HEBE': 'Hebburn Metro SC',
+    'HEES': 'Hedge End Swimming Club',
+    'WHHX': 'Helensburgh ASC',
+    'HEMT': 'Hemel Hempstead SC',
+    'HLSS': 'Henley Leisure Swimming Club',
+    'HENS': 'Henley SC',
+    'HNBS': 'Herne Bay L&SC',
+    'HCEW': 'Heron Swim Team Somerset',
+    'HERT': 'Hertford SC',
+    'HRTT': 'Hertfordshire Aquatics Club',
+    'HETE': 'Hetton SC',
+    'HDCS': 'Highgate DC (Kent)',
+    'NHDX': 'Highland Disability Swim Team',
+    'UHIX': 'Highland Swim Team',
+    'TDCW': 'Highworth Phoenix Diving Club',
+    'HISL': 'Hillingdon Swimming Club',
+    'HINA': 'Hinckley SC',
+    'HINN': 'Hindley SC',
+    'HITT': 'Hitchin SC',
+    'HODT': 'Hoddesdon SC',
+    'HOLY': 'Holywell Swimming Club',
+    'HONW': 'Honiton SC',
+    'HORA': 'Horncastle Otters SC',
+    'HORL': 'Hornchurch SC',
+    'HORW': 'Horton & Broadway Swimming Club',
+    'HLCN': 'Horwich Leisure Centre SC',
+    'HOJL': 'Hounslow Jets',
+    'HBAN': 'Howe Bridge Aces SC',
+    'HOYN': 'Hoylake SC',
+    'HUKA': 'Hucknall SC',
+    'RRHA': 'Hucknall WPC',
+    'HUOE': 'Huddersfield Otters SC',
+    'HWPE': 'Hull Water Polo Club',
+    'HUNT': 'Huntingdon Piranhas SC',
+    'NHYX': 'Huntly ASC',
+    'HYDN': 'Hyde Seal Swimming Club',
+    'HYTS': 'Hythe Aqua',
+    'HYAS': 'Hythe Artistic Swimming Club',
+    'ILFW': 'Ilfracombe SC',
+    'ILKA': 'Ilkeston SC',
+    'ILKE': 'Ilkley SC',
+    'ILMW': 'Ilminster Swimming Club',
+    'IMPT': 'Impington SC',
+    'EISX': 'Incas',
+    'ISMS': 'InSync - Milton Keynes Synchronised Swimming Club',
+    'WIEX': 'Inverclyde ASC',
+    'WIMX': 'Inverclyde Masters ASC',
+    'EIHX': 'Inverleith',
+    'NISX': 'Inverness ASC',
+    'INVS': 'Invicta WPC',
+    'WIJX': 'Islay & Jura Dolphins ASC',
+    'IOMN': 'Isle of Man Swimming Club',
+    'IOMS': 'Isle Of Wight Marlins Swim Club',
+    'JLDS': 'Jersey Long Distance',
+    'JERS': 'Jersey SC',
+    'JWPS': 'Jersey Water Polo Association',
+    'EKOX': 'Kelso ASC',
+    'KENN': 'Kendal SC',
+    'KEMM': 'Kenilworth Masters SC',
+    'KNTQ': 'Kent County ASA',
+    'KWSS': 'Kent Weald Swim Squad',
+    'SAYW': 'Kernow Artistic Swimming Club',
+    'KETA': 'Kettering Amateur Swimming Club',
+    'KEYW': 'Keynsham SC',
+    'KAGS': 'Kidlington & Gosford SC',
+    'KILL': 'Killerwhales SC (Havering)',
+    'WKKX': 'Kilmarnock ASC',
+    'KIMA': 'Kimberley SC',
+    'KINE': 'Kingfishers Scarborough SC',
+    'KCSL': 'Kings Cormorants SC',
+    'KINT': 'Kings Langley SC',
+    'KKFW': 'Kingsbridge Kingfishers SC',
+    'KAQM': 'Kingsbury Aquarius SC',
+    'KLDS': 'Kingston Artistic Swimming Club',
+    'WKNX': 'Kingston ASC',
+    'KIRL': 'Kingston Royals SC',
+    'KUHE': 'Kingston Upon Hull SC',
+    'MKOX': 'Kinross Otters ASC',
+    'WKEX': 'Kintyre ASC',
+    'KIPE': 'Kippax SC',
+    'EKYX': 'Kirkcaldy ASC',
+    'WKTX': 'Kirkcudbright SC',
+    'KIRN': 'Kirkham & Wesham SC',
+    'WKHX': 'Kirkintilloch & Kilsyth ASC',
+    'KNTE': 'Knottingley ASC',
+    'KNUN': 'Knutsford Amateur Swimming Club',
+    'WLKX': 'Lanark',
+    'LNCN': 'Lancashire County WPSA',
+    'LTBN': 'Lancashire Tridents (Blackburn)',
+    'LANN': 'Lancaster City SC',
+    'LCSS': 'Lancing College Swimming Club',
+    'LARS': 'Larkfield SC',
+    'WLAX': 'Larkhall Avondale ASC',
+    'WLWX': 'Larkhall Water Polo Club',
+    'LSCW': 'Launceston SC',
+    'SPAM': 'Leamington Spa SC',
+    'LEAL': 'Leander SC',
+    'LETS': 'Leatherhead SC',
+    'LADM': 'Ledbury & Malvern SC',
+    'LUAE': 'Leeds University Aquatics SC',
+    'LEEM': 'Leek ASC',
+    'LEMA': 'Leicester Masters',
+    'PENA': 'Leicester Penguins SC',
+    'LSHA': 'Leicester Sharks Swimming Club',
+    'LECA': 'Leicestershire ASA',
+    'LBOT': 'Leighton Buzzard Otters Swimming Club for the Disabled',
+    'LBZT': 'Leighton Buzzard SC',
+    'LDST': 'Leiston & District Swimming Club',
+    'ELHX': 'Leith ASC',
+    'NLKX': 'Lerwick ASC',
+    'LCHT': 'Letchworth ASC',
+    'LEWS': 'Lewes SC',
+    'LWPL': 'Lewisham Water Polo Club',
+    'LEYN': 'Leyland Barracudas Swimming Club',
+    'KEYL': 'Leyton SC',
+    'LICM': 'Lichfield SC',
+    'LTSA': 'Lincoln Trident Swimming Academy',
+    'VULA': 'Lincoln Vulcans SC',
+    'LNCA': 'Lincolnshire ASA',
+    'LCRT': 'Linslade Crusaders Swimming Club',
+    'LIVN': 'Liverpool Penguins SC',
+    'ELDX': 'Livingston & District Dolphins',
+    'ELNX': 'Livingston Swim Club',
+    'LNDY': 'Llandudno Swimming Club',
+    'LLLY': 'Llanelli Swimming Club',
+    'NLRX': 'Lochaber Leisure Centre Swim Team',
+    'LSSS': 'Locks Heath Swim Squad',
+    'LOFE': 'Loftus Dolphins SC',
+    'WLDX': 'Lomond SC',
+    'EWPL': 'London Bor of Enfield WPC',
+    'LHOL': 'London Borough of Hounslow',
+    'LBRL': 'London Borough of Redbridge SC',
+    'LODL': 'London Disability SC',
+    'LONL': 'London Region',
+    'LRSL': 'London Regional Synchronised SC',
+    'LEDA': 'Long Eaton SC',
+    'ELRX': 'Lothian Racers SC',
+    'LOGI': 'Loughborough Performance Centre',
+    'LOUA': 'Loughborough Town SC',
+    'LCLA': 'Loughborough University Swimming',
+    'LOMT': 'Loughton Masters Swimming Club',
+    'LODA': 'Louth Dolphins SC',
+    'LCMM': 'Lucton Typhoon SC',
+    'LUDM': 'Ludlow Swimming Club',
+    'LKDT': 'Luton Diving Club',
+    'LYDW': 'Lydney SC',
+    'YLSN': 'Lytham St Annes SC',
+    'MADS': 'Maidenhead ASC',
+    'MAIS': 'Maidstone SC',
+    'WMSX': 'Making Waves ASC',
+    'WENT': 'Maldon Sharks Swimming Club',
+    'MALW': 'Malmesbury Marlins ASC',
+    'MDCE': 'Maltby Diving Club',
+    'MNWN': 'Manchester & North West Disability SC',
+    'MADN': 'Manchester Aquatics Centre DC',
+    'MANI': 'Manchester Performance Centre',
+    'MSWN': 'Manchester Sharks WPC',
+    'MTCN': 'Manchester TC Swimming Club',
+    'MANA': 'Mansfield SC',
+    'MART': 'March Marlins SC',
+    'NSHM': 'Market Drayton SC',
+    'MKHA': 'Market Harborough SC',
+    'MARW': 'Marlborough Penguins ASC',
+    'MPLN': 'Marple SC',
+    'MATA': 'Matlock & District SC',
+    'MWPA': 'Matlock Water Polo Club',
+    'MAXS': 'Maxwell SC',
+    'MMSS': 'Medway Artistic Swimming Club',
+    'MEMS': 'Medway Maritime Swimming Club',
+    'MELW': 'Melksham ASC',
+    'MEMA': 'Melton Mowbray SC',
+    'MMLX': 'Menzieshill & Whitehall Swimming & WPC',
+    'WMMX': 'Merrick Mavericks SC',
+    'MERY': 'Merthyr Tydfil Swimming Club',
+    'MSDL': 'Merton Sch of Diving & T',
+    'MERL': 'Merton Swordfish SC',
+    'MTPL': 'Metropolitan Police SC',
+    'MSMS': 'Mid Sussex Marlins',
+    'MIDE': 'Middlesbrough SC',
+    'MDXL': 'Middlesex County ASA',
+    'EMNX': 'Midlothian SC',
+    'MADT': 'Mildenhall & District SC',
+    'MILY': 'Milford Haven Swimming Club',
+    'MILW': 'Millfield',
+    'WMBX': 'Milngavie & Bearsden',
+    'MMSL': 'Mitcham Marlins Swimming Club',
+    'MOLY': 'Mold Swimming Club',
+    'MMHX': 'Monifieth ASC',
+    'MONY': 'Monnow Swimming Club',
+    'MMSX': 'Montrose & District Seals ASC',
+    'MOOE': 'Moors Swim Squad',
+    'NMYX': 'Moray Masters',
+    'MORE': 'Morley Swimming & WP Club',
+    'MOPE': 'Morpeth SC',
+    'WMWX': 'Motherwell & Wishaw ASC',
+    'KELW': 'Mount Kelly Swimming',
+    'EMHX': 'Musselburgh ASC',
+    'NNNX': 'Nairn ASC',
+    'NNSX': 'Nairn Synchro SC',
+    'NANN': 'Nantwich Seals Swimming Club',
+    'NEAY': 'Neath Swimming Club',
+    'NEVA': 'Nene Valley SC',
+    'NEPA': 'Neptune (Leicester) SC',
+    'NESN': 'Neston SC',
+    'NHST': 'New Hall School Swim Club',
+    'NEWA': 'Newark SC',
+    'NEWS': 'Newbury Swimming Club',
+    'NEWM': 'Newcastle (Staffs) ASC',
+    'NEWE': 'Newcastle SwimTeam',
+    'NUEL': 'Newham & University of East London (UEL) Swimming Club',
+    'NWMT': 'Newmarket & Dist SC',
+    'NADM': 'Newport & District SC',
+    'NPGS': 'Newport Pagnell SC',
+    'NEQW': 'Newquay Cormorants SC',
+    'NQWW': 'Newquay Water Polo Club',
+    'NEWW': 'Newton Abbot Swimming and Water Polo Club',
+    'NLWN': 'Newton Le Willows SC',
+    'NWTY': 'Newtown Swimming Club',
+    'NTVY': 'Nexus Valleys Swimming Club',
+    'COLY': 'Nofio Bae Colwyn',
+    'NCPY': 'Nofio Clwyd',
+    'INDY': 'Nofio Cymru',
+    'SGPY': 'Nofio Gwynedd Performance',
+    'NSGY': 'Nofio Sir Gar',
+    'WNAX': 'North Ayrshire ASC',
+    'ENBX': 'North Berwick SC',
+    'NCDW': 'North Cornwall Dragons SC',
+    'NDTW': 'North Dorset Turbos SC',
+    'NEDE': 'North East Disability Swim Club',
+    'UNLX': 'North Lanarkshire Swim Team',
+    'NLWL': 'North London Water Polo',
+    'NNVT': 'North Norfolk Vikings SC',
+    'NTYE': 'North Tyneside SC',
+    'NWAY': 'North Wales Region',
+    'NTHN': 'North West Region',
+    'NORE': 'Northallerton SC',
+    'NHNA': 'Northampton Swimming Club',
+    'NWPA': 'Northampton Water Polo Club',
+    'NHPA': 'Northamptonshire ASA',
+    'NCEY': 'Northern Celts',
+    'NWMN': 'Northern Wave (Manchester) SC',
+    'NRHM': 'Northgate Bridgnorth SC',
+    'NDPE': 'Northumberland & Durham Performance Programme SC',
+    'NDRE': 'Northumberland and Durham',
+    'NTWN': 'Northwich Centurions SC',
+    'NORW': 'Norton-Radstock SC',
+    'NOST': 'Norwich Swan SC',
+    'NSST': 'Norwich Synchro Club',
+    'BRKT': 'Norwich WPC',
+    'LEAA': 'Nottingham Leander SC',
+    'NORA': 'Nottingham Northern SC',
+    'NPOA': 'Nottingham Portland SC',
+    'NTMA': 'Nottinghamshire ASA',
+    'NOVA': 'Nova Centurion SC',
+    'NUNM': 'Nuneaton & Bedworth SC',
+    'OAWA': 'Oadby & Wigston SC',
+    'WOOX': 'Oban Otters SC',
+    'OKEW': 'Okehampton Otters SC',
+    'OWTL': 'Old Whitgiftians SC',
+    'OLDN': 'Oldham SC',
+    'ORCN': 'ORCA (Royton)',
+    'ORIM': 'Orion SC',
+    'NOYX': 'Orkney ASC',
+    'ORMN': 'Ormskirk & District SC',
+    'OOJL': 'Orpington Ojays',
+    'OSWM': 'Oswestry Otters SC',
+    'OTTL': 'Otter SC',
+    'OUTL': 'Out To Swim',
+    'OBPW': 'Out to Swim Bournemouth + Poole',
+    'OTBS': 'Out to Swim Brighton and Hove',
+    'OTBW': 'Out to Swim Bristol',
+    'OTSL': 'Out to Swim London',
+    'OTNE': 'Out to Swim Newcastle',
+    'WDSS': 'Oxford and Witney Artistic Swimming Club',
+    'OBSS': 'Oxford Brookes University Swimming Club',
+    'OUSS': 'Oxford University SC',
+    'OXUS': 'Oxford University WPC',
+    'ONBS': 'Oxfordshire & North Bucks ASA',
+    'PAIW': 'Paignton SC',
+    'EPSX': 'Peebles ASC',
+    'PEEN': 'Peel Swimming Club (IOM)',
+    'PEMY': 'Pembroke & District Swimming Club',
+    'PCPY': 'Pembrokeshire County Swimming',
+    'PENY': 'Penarth Swimming and Water Polo Club',
+    'PTHN': 'Penrith SC',
+    'PEHY': 'Penyrheol Swimming Club',
+    'PENW': 'Penzance SA and WPC',
+    'PBEM': 'Perry Beeches Triple SSC',
+    'PESM': 'Pershore SC',
+    'MPCX': 'Perth City Swim Club',
+    'MPMX': 'Perth Masters',
+    'PSOT': 'Peterborough Special Olympic Swimming Group',
+    'NPDX': 'Peterhead ASC',
+    'PLCE': 'Peterlee ASC',
+    'WPAX': 'Phoenix Aquatics',
+    'WPXX': 'Phoenix Aquatics Club',
+    'PCAW': 'Plymouth College Aquatics',
+    'PCDW': 'Plymouth Diving',
+    'PLYW': 'Plymouth Leander SC',
+    'PRNW': 'Plymouth Rn/Rm',
+    'PODE': 'Pocklington Dolphin SC',
+    'POLL': 'Polytechnic S&WP Club',
+    'PONE': 'Pontefract Marlins SC',
+    'POPY': 'Pontypridd Swimming Club',
+    'PBOW': 'Poole Bay Open Water Swimming Club',
+    'POOW': 'Poole SC',
+    'PSHW': 'Portishead SC',
+    'EPOX': 'Portobello ASC',
+    'PDSS': 'Portsmouth & District Artistic Swimming Club',
+    'PCWS': 'Portsmouth City Waterpolo Club',
+    'PORS': 'Portsmouth Northsea SC',
+    'POVS': 'Portsmouth Victoria SC',
+    'PBST': 'Potters Bar Artistic Swimming Club',
+    'POTT': 'Potters Bar SC',
+    'POYN': 'Poynton Dippers SC',
+    'PREN': 'Prescot Swimming Club',
+    'PRNN': 'Preston Swimming Club',
+    'PRCT': 'Putteridge Swimming Club',
+    'RADN': 'Radcliffe S&WPC',
+    'RADA': 'Radford SC',
+    'RAMN': 'Ramsbottom SC',
+    'RSNN': 'Ramseian SC',
+    'RAMS': 'Ramsgate SC',
+    'RNWS': 'Rari Nantes Waterpolo and Swimming (Slough)',
+    'RCYS': 'Reading Cygnets SC',
+    'RRSS': 'Reading Royals Artistic SC',
+    'REAS': 'Reading SC',
+    'REDM': 'Redditch SC',
+    'RMAS': 'Redhill & Reigate Marlins',
+    'RERS': 'Redhill & Reigate SC',
+    'RSCS': 'Reed\'s Swimming Club (Cobham)',
+    'WRXX': 'Ren 96',
+    'WRBX': 'Renfrew Baths ASC',
+    'RESA': 'Repton Swimming',
+    'RETA': 'Retford SC',
+    'RCTY': 'Rhondda Cynon Taf Performance Swim Squad',
+    'RHOY': 'Rhondda Swimming Club',
+    'RHYY': 'Rhyl Dolphins Swimming Club',
+    'RICE': 'Richmond Dales ASC',
+    'RSCL': 'Richmond Swimming Club',
+    'RICT': 'Rickmansworth Swim Club Ltd',
+    'RINS': 'Ringwood Seals Swimming Club',
+    'RIPA': 'Ripley SC (rascals)',
+    'RCDN': 'Rochdale Swimming Club',
+    'RTSN': 'Rochdale Triathlon Swimming Club',
+    'ROCT': 'Rochford & District SC',
+    'RORN': 'Rolls Royce SC',
+    'ROML': 'Romford Town SC',
+    'MARN': 'Romiley Marina Swimming Club',
+    'RMYS': 'Romsey & Totton SC',
+    'ROME': 'Rotherham Metro SC',
+    'RMWE': 'Rotherham Metro Water Polo Club',
+    'ROTA': 'Rothwell SC',
+    'RAFA': 'Royal Air Force Swim Team',
+    'RNVS': 'Royal Navy Aquatics',
+    'RTMS': 'Royal Tunbridge Wells Masters SC',
+    'RTWS': 'Royal Tunbridge Wells Monson SC',
+    'WOBW': 'Royal Wootton Bassett ASC',
+    'RPMT': 'Royston Phoenix Masters',
+    'ROYT': 'Royston SC',
+    'RUGM': 'Rugby SC',
+    'RUIL': 'Ruislip Northwood Masters SC',
+    'RREN': 'Runcorn Reps SC',
+    'RUNT': 'Runnymede SC',
+    'RSHA': 'Rushcliffe SC',
+    'RUSA': 'Rushden ASC',
+    'RUSS': 'Rushmoor Artistic SC',
+    'RURS': 'Rushmoor Royals SC',
+    'WRNX': 'Rutherglen ASC',
+    'RUTY': 'Ruthin Rays Swimming Club',
+    'RYDS': 'Ryde Swimming Club',
+    'RYEE': 'Ryedale SC',
+    'RYKA': 'Rykneld SC',
+    'SADN': 'Saddleworth SC',
+    'SAFT': 'Saffron Walden SC',
+    'SACN': 'Salford City SC',
+    'SASW': 'Salisbury Stingrays SC',
+    'SALE': 'Saltburn & Marske SC',
+    'SSHN': 'Sandbach Sharks SC',
+    'SAQM': 'Sandwell Aquatics Club',
+    'SDCM': 'Sandwell Diving Club',
+    'SATN': 'Satellite of Macclesfield SC',
+    'SAXL': 'Saxon Crown (Lewisham) SC',
+    'SCAE': 'Scarborough Swimming Club',
+    'ESNX': 'Scorpion Swim Team',
+    'WSAX': 'Scotia ASC',
+    'SCCX': 'Scotland Composite',
+    'SEDX': 'Scotland East',
+    'SMDX': 'Scotland Midland',
+    'SNDX': 'Scotland North',
+    'SCWX': 'Scotland West',
+    'SASA': 'Scottish ASA Life Member',
+    'USNX': 'Scottish Non-Residential',
+    'USSX': 'Scottish Schools Swimming Assoc',
+    'USWX': 'Scottish Swimming Staff',
+    'SCNE': 'Scunthorpe Anchor SC',
+    'SEAS': 'Seaclose Swimming Club',
+    'SEGW': 'Seagulls Swimming Club',
+    'ESYX': 'SEC Cyclones',
+    'SDGE': 'Sedgefield & District 75',
+    'SDWE': 'Sedgefield Water Polo Club',
+    'SELE': 'Selby Tigersharks Swimming Squad',
+    'SERL': 'Serpentine SC',
+    'SETE': 'Settle Stingrays SC',
+    'SEVS': 'Sevenoaks SC',
+    'SSTW': 'Severnside Tritons Swimming Club',
+    'SSSL': 'Seymour Synchro Swim Sch',
+    'SHKL': 'Sharks SC of Mottingham',
+    'SHSS': 'Sheerness SC & Lifeguard Corp',
+    'SHEE': 'Sheffield City SC',
+    'SHEA': 'Shepshed SC',
+    'SHES': 'Shepway Swimming Club',
+    'SHRA': 'Sherwood Colliery SC',
+    'SSDA': 'Sherwood Seals Swimming Club',
+    'NSHX': 'Shetland ASC',
+    'NSTX': 'Shetland Masters',
+    'USDX': 'Shetland Swimming Association',
+    'SHWM': 'Shrewsbury SC',
+    'SHPM': 'Shropshire ASA',
+    'SIDW': 'Sid Vale SC',
+    'NSCX': 'Silver City Blues ASC',
+    'SAMS': 'Sittingbourne & Milton SC',
+    'SKEA': 'Skegness ASC',
+    'SKIE': 'Skipton Swimming Club',
+    'NSEX': 'Skye Dolphins ASC',
+    'SLES': 'Slough Dolphin Swimming Club',
+    'SCPS': 'Solent Cardinal Performance Swimming',
+    'SOLM': 'Solihull SC',
+    'SMSW': 'Somerset ASA',
+    'USAX': 'South Aberdeenshire Swim Team',
+    'SASE': 'South Axholme Sharks SC',
+    'WSEX': 'South Ayrshire ASC',
+    'SBMT': 'South Beds Masters Swimming Club',
+    'SCRL': 'South Croydon SC',
+    'SDWA': 'South Derbyshire Water Polo Club',
+    'SDTS': 'South Downs Trojan Swimming Club',
+    'SCTS': 'South East Region',
+    'EWAY': 'South East Wales Region',
+    'SHLE': 'South Holderness SC',
+    'SOHE': 'South Hunsley SC',
+    'USLX': 'South Lanarkshire Swimming',
+    'SLCA': 'South Lincs Competitive SC',
+    'SLSL': 'South London Open Water SC',
+    'NSMX': 'South Mainland ASC',
+    'STDE': 'South Tyneside SC',
+    'SWDL': 'South West London Diving Club',
+    'WSTW': 'South West Region',
+    'WWAY': 'South West Wales Region',
+    'SYSE': 'South Yorkshire Swans',
+    'SHMM': 'Southam SC',
+    'SDAS': 'Southampton Diving Academy',
+    'USSS': 'Southampton University SC',
+    'SOTS': 'Southampton University WPC',
+    'SHWS': 'Southampton Water Polo Club',
+    'SEDT': 'Southend Diving',
+    'SOUN': 'Southern I-O-M SC',
+    'SPTN': 'Southport SC',
+    'SAQL': 'Southwark Aquatics SC',
+    'SOUA': 'Southwell SC',
+    'SWLL': 'SouthWest LondonFin SC',
+    'SOTW': 'Southwold Swimming Club',
+    'SBLE': 'Sowerby Bridge Stingrays SC',
+    'SPDA': 'Spalding SC',
+    'SPEE': 'Spenborough SC',
+    'SPEL': 'Spencer Swim Team',
+    'SAMT': 'St Albans Masters SC',
+    'ESAX': 'St Andrews Masters ASC',
+    'STAW': 'St Austell ASC',
+    'SGAS': 'St George\'s Ascot Swimming Club',
+    'STHN': 'St Helens Swimming Club',
+    'SIVT': 'St Ives SC',
+    'SJAL': 'St James SC',
+    'SWNT': 'St Neots Swans Swimming Club',
+    'MASX': 'St Thomas ASC',
+    'APXM': 'Stafford Apex SC',
+    'STFM': 'Staffordshire ASA',
+    'STAS': 'Staines Swimming Club',
+    'STAN': 'Stalybridge SC',
+    'FSST': 'Stanway SC',
+    'STCS': 'Star Diving Club Guildford',
+    'ESRX': 'Step Rock ASC',
+    'STET': 'Stevenage SC',
+    'WSWX': 'Stirling Swimming',
+    'STXL': 'Stock Exchange SC',
+    'STMN': 'Stockport Metro SC',
+    'STON': 'Stockport SC',
+    'STOE': 'Stocksbridge Pentaqua SC',
+    'STKE': 'Stockton ASC',
+    'STYE': 'Stokesley SC',
+    'SADM': 'Stone & District SC',
+    'NSNX': 'Stonehaven ASC',
+    'SSST': 'Stopsley Swim Squad',
+    'STRM': 'Stourbridge SC',
+    'STOT': 'Stowmarket SC',
+    'WSRX': 'Stranraer Stingrays ASC',
+    'SSHM': 'Stratford Sharks SC',
+    'WSCX': 'Strathclyde Aquatics',
+    'WSYX': 'Strathclyde University Swimming & WPC',
+    'STML': 'Streatham SC',
+    'STEW': 'Street & District SC',
+    'STRN': 'Stretford SC',
+    'STMW': 'Stroud Masters SC',
+    'SCOT': 'Suffolk Coastal Torpedoes',
+    'SCDE': 'Sunderland City Dive Team',
+    'SUOS': 'Sunflower Swimming Club - Oxford',
+    'SRYQ': 'Surrey County ASA',
+    'SSXS': 'Sussex County ASA',
+    'SUTL': 'Sutton & Cheam SC',
+    'SUTA': 'Sutton In Ashfield SC',
+    'SWAA': 'Swadlincote SC',
+    'SSMY': 'Swansea Masters Swimming Club',
+    'SWDY': 'Swansea Stingrays Swimming Club',
+    'SSYY': 'Swansea Synchro Club',
+    'SUNY': 'Swansea University Swimming Club',
+    'SWPY': 'Swansea Water Polo',
+    'SBOW': 'Swim Bournemouth',
+    'SCPY': 'Swim Conwy',
+    'BDFT': 'Swim England Bedfordshire',
+    'CMBT': 'Swim England Cambridgeshire',
+    'SECQ': 'Swim England County',
+    'ESXQ': 'Swim England Essex',
+    'HRTT': 'Swim England Hertfordshire',
+    'NRFT': 'Swim England Norfolk',
+    'SERQ': 'Swim England Region',
+    'SFKT': 'Swim England Suffolk',
+    'SETQ': 'Swim England Talent Club',
+    'SCCT': 'Swim Fore IT',
+    'WASA': 'Swim Wales',
+    'UWLX': 'Swim West Lothian',
+    'NWIX': 'Swim Western Isles',
+    'ESIX': 'Swim-IT',
+    'ESCX': 'SwimClusion',
+    'SWAW': 'Swindon ASC',
+    'SWDW': 'Swindon Dolphin ASC',
+    'SWIN': 'Swinton SC',
+    'TADE': 'Tadcaster York Sport Swim Squad',
+    'NTNX': 'Tain ASC',
+    'THSW': 'Talbot Heath School Swimming Club',
+    'TAMM': 'Tamworth SC',
+    'TASS': 'Tandridge Aquarius Swim Squad',
+    'TASW': 'Taunton Artistic Swimming Club',
+    'TDSW': 'Taunton Deane SC',
+    'TAVW': 'Tavistock SC',
+    'MTMX': 'Tay Masters',
+    'TANT': 'Team Anglia Masters Swimming Club',
+    'TBSW': 'Team Bath Artistic Swimming Club',
+    'ASPW': 'Team Bath AS',
+    'YKVE': 'Team Jorvik and New Earswick SC - York Vikings',
+    'LUTT': 'Team Luton Swimming',
+    'TWST': 'Team Waveney Swimming Club',
+    'IPST': 'Teamipswich Swimming',
+    'TEDL': 'Teddington SC',
+    'TTOL': 'Teddington Torpedoes',
+    'TESE': 'Teesdale ASC',
+    'TTSE': 'Teesdale Tiger Sharks',
+    'TEIW': 'Teignmouth Swimming Club',
+    'TEAM': 'Telford Aqua',
+    'TENY': 'Tenby and District Swimming Club',
+    'TEWW': 'Tewkesbury SC',
+    'TAMS': 'Thame Swimming Club',
+    'THAS': 'Thanet Swim Club',
+    'RSWM': 'The Royal School Wolverhampton Swimming',
+    'BIUM': 'The University Of Birmingham',
+    'THDT': 'Thetford Dolphins SC',
+    'TWHE': 'Thirsk White Horse Swim Team',
+    'THOE': 'Thornaby SC',
+    'THUT': 'Thurrock Swimming Club',
+    'NTOX': 'Thurso ASC',
+    'SWCW': 'Tidworth Congers ASC',
+    'TIGS': 'Tigers SC (Jersey) Ltd',
+    'THAW': 'Tigersharks',
+    'TILS': 'Tilehurst SC',
+    'TIVW': 'Tiverton SC',
+    'TIWW': 'Tiverton Water Polo Club',
+    'TONS': 'Tonbridge SC',
+    'TDOY': 'Torfaen Dolphins Performance',
+    'TQLW': 'Torquay Leander SC',
+    'TORW': 'Torridgeside SC',
+    'TOTW': 'Totnes SC',
+    'TOWL': 'Tower Hamlets SC',
+    'TSSN': 'Trafford Artistic Swimming Club',
+    'TMBN': 'Trafford Metro Bor SC',
+    'ETTX': 'Tranent ASC',
+    'TREY': 'Tredegar Torpedoes Swimming Club',
+    'CHAW': 'Trident Swimming Club of East Devon, West Dorset and South Somerset',
+    'TRIT': 'Tring Swimming Club',
+    'ETNX': 'Trojan ASC',
+    'TROW': 'Trowbridge ASC',
+    'TRUW': 'Truro City SC',
+    'TGLM': 'Tudor Grange Learn to Dive',
+    'TWDS': 'Tunbridge Wells Diving Club',
+    'TURL': 'Turtles Of South London SC',
+    'TYLN': 'Tyldesley Swimming Club',
+    'TYNE': 'Tynedale SC',
+    'TDCE': 'Tynemouth Diving Club',
+    'TYME': 'Tynemouth SC',
+    'NULX': 'Ullapool Swimming Club',
+    'ULVN': 'Ulverston SC',
+    'UNAX': 'Unattached',
+    'NUAX': 'University of Aberdeen Performance Swimming',
+    'BAUW': 'University of Bath SC',
+    'UBWW': 'University of Bath WPC',
+    'UEAT': 'University of East Anglia Swimming & Water Polo Club',
+    'UMAN': 'University of Manchester Swimming Club',
+    'UONA': 'University of Nottingham SC',
+    'WUSX': 'University Of Stirling',
+    'WSUX': 'University of Stirling Water Polo Club',
+    'SUNS': 'University of Surrey Swimming Club',
+    'NUDX': 'Upper Deeside ASC',
+    'VERT': 'Verulam ASC',
+    'WVSX': 'Visions Swim Academy',
+    'WALN': 'Wallasey SC',
+    'WASM': 'Walsall Artistic Swimming Club',
+    'WLTM': 'Walsall Learn to Dive',
+    'WALM': 'Walsall Swim and Water Polo Club',
+    'WFDL': 'Waltham Forest Diving Club',
+    'WANL': 'Wandsworth SC',
+    'WWWS': 'Wantage White Horses',
+    'WAYS': 'Wantage Youth SC',
+    'WART': 'Ware SC',
+    'WARW': 'Wareham & District SC',
+    'WAMW': 'Warminster & District ASC',
+    'EWBX': 'Warrender Baths Club',
+    'WMSN': 'Warrington Masters Swimming Club',
+    'WARN': 'Warrington Swimming Club',
+    'WOWN': 'Warrington Warriors SC',
+    'WAUM': 'Warwick University SC',
+    'WARM': 'Warwick Water Polo Club',
+    'WWKM': 'Warwickshire ASA',
+    'WATT': 'Watford SC',
+    'WPOT': 'Watford Water Polo Club',
+    'WEVE': 'Wear Valley SC',
+    'WELA': 'Wellingborough SC',
+    'WLNW': 'Wellington',
+    'WTNM': 'Wellington (Telford) SC',
+    'WELW': 'Wells Swimming Club',
+    'WWPY': 'Welsh Wanderers Water Polo Club',
+    'WELY': 'Welshpool Sharks Swimming Club',
+    'WELT': 'Welwyn Garden SC',
+    'WDOW': 'West Dorset SC',
+    'WDDX': 'West Dunbartonshire ASC',
+    'EWEX': 'West Edinburgh Stingrays',
+    'WEKN': 'West Kirby ASC',
+    'HAPL': 'West London Penguin Swimming & Water Polo Club',
+    'WESM': 'West Midland Region',
+    'KLWT': 'West Norfolk Swimming Club',
+    'WSUT': 'West Suffolk Swimming Club',
+    'WEWS': 'West Wight SC',
+    'WWDW': 'West Wilts Diving Club',
+    'WESW': 'Westbury ASC',
+    'WABX': 'Western Baths WPC',
+    'NWDX': 'Westhill District ASC',
+    'WTIL': 'Westminster Tiburones SC',
+    'WSMW': 'Weston-Super-Mare SC',
+    'NWSX': 'Westside Sharks Swimming Club',
+    'WETE': 'Wetherby SC',
+    'WEYS': 'Wey Valley SC',
+    'WPWW': 'Weymouth & Portland WPC',
+    'WEYW': 'Weymouth SC',
+    'WEOW': 'Weyport Masters SC',
+    'NWYX': 'Whalsay ASC',
+    'WHTE': 'Whitby Seals SC',
+    'WHTM': 'Whitchurch Wasps Swimming Club',
+    'WCDS': 'White Cliffs (of Dover) Swimming Club',
+    'WHIS': 'White Oak SC',
+    'WHSL': 'Whitgift Swimming Club',
+    'WSCT': 'Whittlesey SC',
+    'NWKX': 'Wick ASC',
+    'WBEN': 'Wigan Best SC',
+    'WIGN': 'Wigan SC',
+    'WWAS': 'Wildern Waves',
+    'WRSL': 'Willesden Rapids Swimming Club',
+    'WILN': 'Wilmslow & District ASC',
+    'WLTW': 'Wiltshire ASA',
+    'WMBL': 'Wimbledon Dolphins SC',
+    'WINW': 'Wincanton SC',
+    'WCPS': 'Winchester City Penguins',
+    'WIWS': 'Winchester Water Polo Club',
+    'WMSS': 'Windsor & Maidenhead StarFish SC',
+    'WINS': 'Windsor SC',
+    'WINN': 'Winsford Swimming Club',
+    'WIMN': 'Wirral Metro SC',
+    'WIST': 'Wisbech Swimming Club',
+    'WITT': 'Witham Dolphins SC',
+    'WITN': 'Withnell SC',
+    'WITS': 'Witney & District SC',
+    'WWPS': 'Witney Water Polo Club',
+    'WOKS': 'Woking SC',
+    'WLVM': 'Wolverhampton SC',
+    'WOMM': 'Wombourne SC',
+    'WOON': 'Woodchurch SC',
+    'WOSA': 'Woodhall Sharks SC',
+    'WOFT': 'Woodham Ferrers Swimming Club',
+    'WOOL': 'Woodside & Thornton Heath SC',
+    'WSCN': 'Woolton SC',
+    'WRCM': 'Worcester County ASA',
+    'WCRM': 'Worcester Crocodiles',
+    'WORM': 'Worcester SC',
+    'WORN': 'Workington SC',
+    'WOKA': 'Worksop Dolphins SC',
+    'WORS': 'Worthing Swimming Club',
+    'WCOM': 'Wrekin SC',
+    'WREY': 'Wrexham Swimming Club',
+    'WRWY': 'Wrexham Water Polo',
+    'WYCS': 'Wycombe District SC',
+    'WLDM': 'Wyndley Learn to Dive',
+    'WYRM': 'Wyre Forest SC',
+    'WYTN': 'Wythenshawe SC',
+    'MYAX': 'Y.A.A.B.A ASC',
+    'YEOW': 'Yeovil District SC',
+    'YCBE': 'York City Baths Club',
+    'YRKE': 'Yorkshire AS',
+    'NYNX': 'Ythan ASC'
+}
+
+    if (togglePassword) {
+        togglePassword.onclick = function(e) {
+            if (e) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+            const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
+            passwordInput.setAttribute('type', type);
+            this.textContent = type === 'password' ? 'Show' : 'Hide';
+            return false;
+        };
+    }
+
+    if (submitBtn) {
+        submitBtn.onclick = function(e) {
+            if (e) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+            
+            const username = document.getElementById('livestreamUsername').value;
+            const password = document.getElementById('livestreamPassword').value;
+
+            if (username === 'announcer' && password === '1066') {
+                errorMessage.classList.remove('show');
+                loginContainer.style.display = 'none';
+                fullscreenView.classList.add('active');
+                
+                // Request fullscreen
+                if (fullscreenView.requestFullscreen) {
+                    fullscreenView.requestFullscreen();
+                } else if (fullscreenView.webkitRequestFullscreen) {
+                    fullscreenView.webkitRequestFullscreen();
+                } else if (fullscreenView.msRequestFullscreen) {
+                    fullscreenView.msRequestFullscreen();
+                }
+            } else {
+                errorMessage.classList.add('show');
+            }
+            return false;
+        };
+    }
+
+    // Handle fullscreen exit
+    document.addEventListener('fullscreenchange', function() {
+        if (!document.fullscreenElement) {
+            fullscreenView.classList.remove('active');
+            loginContainer.style.display = 'block';
+        }
+    });
+
+    document.addEventListener('webkitfullscreenchange', function() {
+        if (!document.webkitFullscreenElement) {
+            fullscreenView.classList.remove('active');
+            loginContainer.style.display = 'block';
+        }
+    });
+
+    // Display state management
+    let displayState = {
+        eventName: '',
+        heatName: '',
+        lanes: {},
+        timerRunning: false,
+        resultsLocked: false, // Track if results should persist after SAVED
+        laneResults: {} // Track time, place, lp for each lane
+    };
+
+    // Helper function to smoothly update element content
+    function updateElement(element, newValue, addFadeIn = true) {
+        if (!element) return;
+        
+        const currentValue = element.textContent;
+        if (currentValue === newValue) return;
+        
+        // Add updating class for smooth transition
+        element.classList.add('updating');
+        
+        setTimeout(() => {
+            element.textContent = newValue;
+            element.classList.remove('updating');
+            if (addFadeIn) {
+                element.classList.add('fade-in');
+                setTimeout(() => element.classList.remove('fade-in'), 300);
+            }
+        }, 200);
+    }
+
+    // Format time for display (always XX:XX.XX format)
+    function formatTime(time) {
+        if (!time) return '';
+        
+        // Clean the input
+        let cleaned = time.replace(/\s/g, '');
+        
+        // Parse the time components
+        let minutes = '00';
+        let seconds = '00';
+        let hundredths = '00';
+        
+        if (cleaned.includes(':') && cleaned.includes('.')) {
+            // Format: MM:SS.HH
+            const parts = cleaned.split(':');
+            minutes = parts[0].padStart(2, '0');
+            const secParts = parts[1].split('.');
+            seconds = secParts[0].padStart(2, '0');
+            hundredths = secParts[1].substring(0, 2).padEnd(2, '0');
+        } else if (cleaned.includes('.')) {
+            // Format: SS.HH (no minutes)
+            const parts = cleaned.split('.');
+            seconds = parts[0].padStart(2, '0');
+            hundredths = parts[1].substring(0, 2).padEnd(2, '0');
+        }
+        
+        return `${minutes}:${seconds}.${hundredths}`;
+    }
+
+    // Format title with proper capitalization
+    function formatTitle(text) {
+        if (!text) return '';
+        
+        // Split by spaces and process each word
+        return text.split(' ').map(word => {
+            // Keep Open/Male, Open/Female as is with both capitalized
+            if (word.includes('/')) {
+                return word.split('/').map(part => 
+                    part.charAt(0).toUpperCase() + part.slice(1).toLowerCase()
+                ).join('/');
+            }
+            // Capitalize first letter, lowercase rest
+            return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+        }).join(' ');
+    }
+
+    // Update event name
+    function updateEventName(eventName, eventID) {
+        if (!eventName || eventName === displayState.eventName) return;
+        
+        const eventInfo = document.getElementById('livestreamEventInfo');
+        const formattedEvent = "Event " + eventID + " " + formatTitle(eventName);
+        const heatDisplay = displayState.heatName ? ` ${formatTitle(displayState.heatName)}` : '';
+        updateElement(eventInfo, formattedEvent + heatDisplay);
+        displayState.eventName = "Event " + eventID + " " + eventName;
+        
+        console.log('[UPDATE] Event Name:', formattedEvent);
+    }
+
+    // Update heat name
+    function updateHeatName(heatName) {
+        if (!heatName || heatName === displayState.heatName) return;
+        
+        const eventInfo = document.getElementById('livestreamEventInfo');
+        const eventDisplay = displayState.eventName ? formatTitle(displayState.eventName) : '';
+        const formattedHeat = formatTitle(heatName);
+        updateElement(eventInfo, eventDisplay + ` ${formattedHeat}`);
+        displayState.heatName = heatName;
+        
+        console.log('[UPDATE] Heat Name:', formattedHeat);
+    }
+
+    // Update swimmer information for all lanes
+    function updateSwimmers(lanes) {
+        if (!lanes) return;
+        
+        displayState.lanes = lanes;
+        
+        // Update each lane
+        for (let lane = 1; lane <= 8; lane++) {
+            const laneData = lanes[lane.toString()];
+            if (!laneData) continue;
+            
+            const row = document.querySelector(`[data-lane="${lane}"]`);
+            if (!row) continue;
+            
+            const nameEl = row.querySelector('[data-field="name"]');
+            const clubEl = row.querySelector('[data-field="club"]');
+			
+			const clubCode = laneData.club;
+			const clubName = CLUB_MAPPING[clubCode] || clubCode;
+			
+            
+            updateElement(nameEl, laneData.name || '', true);
+            updateElement(clubEl, clubName || '', true);
+        }
+        
+        console.log('[UPDATE] Swimmers updated for all lanes');
+    }
+    
+    // Update active lanes (hide lanes that are turned off)
+    function updateActiveLanes(activeLanes) {
+        if (!activeLanes || !Array.isArray(activeLanes)) return;
+		
+		if (displayState.resultsLocked) {
+            return;
+        }
+        
+        console.log('[UPDATE] Active lanes:', activeLanes);
+        
+        // Update visibility for all lanes
+        for (let lane = 1; lane <= 8; lane++) {
+            const row = document.querySelector(`[data-lane="${lane}"]`);
+            if (!row) continue;
+            
+            const isActive = activeLanes.includes(lane);
+            
+            if (isActive) {
+                row.style.opacity = '1';
+                row.style.visibility = 'visible';
+            } else {
+                row.style.opacity = '0';
+                row.style.visibility = 'hidden';
+            }
+        }
+    }
+
+    // Clear timing data (when timer stops)
+    function clearTimingData() {
+        if (displayState.resultsLocked) {
+            console.log('[INFO] Results locked - not clearing timing data');
+            return;
+        }
+        
+        for (let lane = 1; lane <= 8; lane++) {
+            const row = document.querySelector(`[data-lane="${lane}"]`);
+            if (!row) continue;
+            
+            const timeEl = row.querySelector('[data-field="time"]');
+            const placeEl = row.querySelector('[data-field="place"]');
+            const lpEl = row.querySelector('[data-field="lp"]');
+            
+            updateElement(timeEl, '', false);
+            updateElement(placeEl, '', false);
+            updateElement(lpEl, '', false);
+            
+            timeEl.classList.remove('dq');
+        }
+        
+        console.log('[CLEAR] Timing data cleared');
+    }
+
+    // Get maximum lap number across all lanes
+    function getMaxLapNumber() {
+        let maxLp = 0;
+        for (const lane in displayState.laneResults) {
+            const lp = displayState.laneResults[lane].lp || 0;
+            if (lp > maxLp) {
+                maxLp = lp;
+            }
+        }
+        return maxLp;
+    }
+
+    // Clear data for lanes behind the leader
+    function clearLaggingLanes() {
+        const maxLp = getMaxLapNumber();
+        if (maxLp === 0) return;
+        
+        for (let lane = 1; lane <= 8; lane++) {
+            const laneData = displayState.laneResults[lane.toString()];
+            if (!laneData) continue;
+            
+            const currentLp = laneData.lp || 0;
+            
+            // If this lane is behind the leader, clear their timing data
+            if (currentLp < maxLp) {
+                const row = document.querySelector(`[data-lane="${lane}"]`);
+                if (!row) continue;
+                
+                const timeEl = row.querySelector('[data-field="time"]');
+                const placeEl = row.querySelector('[data-field="place"]');
+                const lpEl = row.querySelector('[data-field="lp"]');
+                
+                updateElement(timeEl, '', false);
+                updateElement(placeEl, '', false);
+                updateElement(lpEl, '', false);
+                
+                // Update state
+                displayState.laneResults[lane.toString()] = {
+                    time: '',
+                    place: '',
+                    lp: 0
+                };
+            }
+        }
+    }
+
+    // Recalculate positions after DQ
+    function recalculatePositions() {
+        // Get all lanes with valid finishes (not DQ'd)
+        const validLanes = [];
+        for (let lane = 1; lane <= 8; lane++) {
+            const laneData = displayState.laneResults[lane.toString()];
+            if (laneData && laneData.place && laneData.place !== '' && !laneData.isDQ) {
+                validLanes.push({
+                    lane: lane,
+                    place: parseInt(laneData.place)
+                });
+            }
+        }
+        
+        // Sort by current place
+        validLanes.sort((a, b) => a.place - b.place);
+        
+        // Reassign places (1, 2, 3, etc.)
+        validLanes.forEach((item, index) => {
+            const newPlace = (index + 1).toString();
+            const row = document.querySelector(`[data-lane="${item.lane}"]`);
+            if (row) {
+                const placeEl = row.querySelector('[data-field="place"]');
+                updateElement(placeEl, newPlace, true);
+                displayState.laneResults[item.lane.toString()].place = newPlace;
+            }
+        });
+        updateMedalBanners();
+        console.log('[RECALC] Positions recalculated after DQ');
+    }
+	
+	// Helper to remove all medal classes from a row
+    function clearMedalClasses(row) {
+        row.classList.remove('medal-gold', 'medal-silver', 'medal-bronze');
+    }
+
+    // Apply Gold, Silver, or Bronze banner based on place
+    function updateMedalBanners() {
+        for (let lane = 1; lane <= 8; lane++) {
+            const row = document.querySelector(`[data-lane="${lane}"]`);
+            if (!row) continue;
+			
+			const laneResult = displayState.laneResults[lane.toString()];
+			const place = laneResult ? laneResult.place : undefined;
+			
+            clearMedalClasses(row); // Start by cleaning previous medals
+
+            if (place) {
+                const p = parseInt(place);
+                switch (p) {
+                    case 1:
+                        row.classList.add('medal-gold');
+                        break;
+                    case 2:
+                        row.classList.add('medal-silver');
+                        break;
+                    case 3:
+                        row.classList.add('medal-bronze');
+                        break;
+                }
+            }
+        }
+        console.log('[UPDATE] Medal banners refreshed.');
+    }
+
+    // Update finish time for a lane
+    function updateFinishTime(finishData) {
+        const lane = finishData.lane;
+        const time = finishData.time;
+        const place = finishData.place || '';
+        const timeNumber = finishData.timeNumber || 1;
+        const type = finishData.type || 'FINISH';
+        
+        const row = document.querySelector(`[data-lane="${lane}"]`);
+        if (!row) return;
+        
+        const timeEl = row.querySelector('[data-field="time"]');
+        const placeEl = row.querySelector('[data-field="place"]');
+        const lpEl = row.querySelector('[data-field="lp"]');
+        
+        // Multiply lap number by 2
+        const displayLp = timeNumber * 2;
+        
+        // Update time (format it to XX:XX.XX)
+        const formattedTime = formatTime(time);
+        updateElement(timeEl, formattedTime, true);
+        timeEl.classList.remove('dq');
+        
+        // Update place (for both splits and finishes)
+        if (place) {
+            updateElement(placeEl, place, true);
+        }
+        
+        // Update lap number (multiplied by 2)
+        if (timeNumber > 0) {
+            updateElement(lpEl, displayLp.toString(), true);
+        }
+        
+        // Store in state
+        if (!displayState.laneResults[lane.toString()]) {
+            displayState.laneResults[lane.toString()] = {};
+        }
+        displayState.laneResults[lane.toString()] = {
+            time: formattedTime,
+            place: place,
+            lp: displayLp,
+            isDQ: false
+        };
+        
+        // Clear lagging lanes
+        clearLaggingLanes();
+		updateMedalBanners();
+		
+        
+        console.log(`[UPDATE] Lane ${lane} - Type: ${type}, Time: ${formattedTime}, Place: ${place}, Lp: ${displayLp}`);
+    }
+
+    // Handle disqualification
+    function updateDQ(dqData) {
+        const lane = dqData.lane;
+        
+        const row = document.querySelector(`[data-lane="${lane}"]`);
+        if (!row) return;
+        
+        const timeEl = row.querySelector('[data-field="time"]');
+        const placeEl = row.querySelector('[data-field="place"]');
+        const lpEl = row.querySelector('[data-field="lp"]');
+        
+        // Set DQ in time field with red color
+        updateElement(timeEl, 'DQ', true);
+        timeEl.classList.add('dq');
+        
+        // Clear place and lp
+        updateElement(placeEl, '', false);
+        updateElement(lpEl, '', false);
+        
+        // Mark as DQ in state
+        if (!displayState.laneResults[lane.toString()]) {
+            displayState.laneResults[lane.toString()] = {};
+        }
+        displayState.laneResults[lane.toString()].isDQ = true;
+        displayState.laneResults[lane.toString()].place = '';
+        displayState.laneResults[lane.toString()].lp = 0;
+        
+        // Recalculate positions for remaining swimmers
+        recalculatePositions();
+		updateMedalBanners();
+        
+        console.log(`[UPDATE] Lane ${lane} - DISQUALIFIED`);
+    }
+
+    // Handle new event/heat (clear results if not locked)
+    function handleNewEventOrHeat() {
+        console.log('[RESET] New event/heat - clearing timing data and showing all lanes');
+        displayState.resultsLocked = false;
+        displayState.laneResults = {}; // Clear lane results state
+        clearTimingData();
+        
+        // Reset all lanes to visible when new event/heat starts
+        for (let lane = 1; lane <= 8; lane++) {
+            const row = document.querySelector(`[data-lane="${lane}"]`);
+            if (row) {
+                row.style.opacity = '1';
+                row.style.visibility = 'visible';
+				clearMedalClasses(row);
+            }
+        }
+		if (displayState.resultsLocked) {
+			return;
+		}
+    }
+
+    // WebSocket connection
+    let ws = null;
+
+    function connectWebSocket() {
+        console.log('[WS] Attempting to connect to ws://localhost:8001...');
+        
+        ws = new WebSocket('ws://localhost:8001');
+
+        ws.onopen = function() {
+            console.log('[WS] âœ… Connected to Swim Live System');
+        };
+
+        ws.onmessage = function(event) {
+            try {
+                const data = JSON.parse(event.data);
+                console.log('[WS] ðŸ“¨ Received:', data);
+
+                // Handle event name update
+                if (data.eventName !== undefined) {
+                    handleNewEventOrHeat();
+                    updateEventName(data.eventName, data.eventID);
+                }
+
+                // Handle heat name update
+                if (data.heatName !== undefined) {
+                    if (displayState.heatName && data.heatName !== displayState.heatName) {
+                        handleNewEventOrHeat();
+                    }
+                    updateHeatName(data.heatName);
+                }
+
+                // Handle swimmer data update
+                if (data.lanes !== undefined) {
+                    updateSwimmers(data.lanes);
+                }
+                
+                // Handle active lanes (hide turned off lanes)
+                if (data.activeLanes !== undefined) {
+                    updateActiveLanes(data.activeLanes);
+                }
+
+                // Handle timer sync
+                if (data.timerSync !== undefined) {
+                    const wasRunning = displayState.timerRunning;
+                    displayState.timerRunning = data.timerSync.running;
+                    
+                    // If timer stopped and results not locked, clear timing data
+                    if (wasRunning && !data.timerSync.running && !displayState.resultsLocked) {
+                        clearTimingData();
+                    }
+                }
+
+                // Handle finish time
+                if (data.finishTime !== undefined) {
+                    updateFinishTime(data.finishTime);
+                }
+
+                // Handle disqualification
+                if (data.disqualification !== undefined) {
+                    updateDQ(data.disqualification);
+                }
+
+                // Handle SAVED status - lock results
+                if (data.status === "SAVED") {
+                    console.log('[STATUS] Results saved - locking display');
+                    displayState.resultsLocked = true;
+                }
+
+            } catch (error) {
+                console.error('[WS] âŒ Error parsing message:', error);
+            }
+        };
+
+        ws.onerror = function(error) {
+            console.error('[WS] âŒ WebSocket error:', error);
+        };
+
+        ws.onclose = function() {
+            console.log('[WS] âš ï¸ Connection closed. Reconnecting in 1 second...');
+            setTimeout(connectWebSocket, 1000);
+        };
+    }
+
+    // Start WebSocket connection when page loads
+    window.addEventListener('load', function() {
+        console.log('[INIT] Page loaded - starting WebSocket connection...');
+        connectWebSocket();
+    });
+
+    // Clean up on page unload
+    window.addEventListener('beforeunload', function() {
+        if (ws) {
+            console.log('[WS] Closing connection...');
+            ws.close();
+        }
+    });
+})();
+</script>'''
         
         # Write HTML files
         with open(self.html_dir / "EventTimer.html", 'w', encoding='utf-8') as f:
@@ -3074,8 +5294,50 @@ window.addEventListener('beforeunload', () => {
             f.write(split_times_html)
         with open(self.html_dir / "LaneEnds.html", 'w', encoding='utf-8') as f:
             f.write(lane_ends_html)
+        with open(self.html_dir / "Announcer.html", 'w', encoding='utf-8') as f:
+            f.write(announcer_html)
         
         print(f"[OK] Generated HTML files in: {self.html_dir}")
+
+    def _ensure_obs_scene_lock(self):
+        """Keep OBS on 'Blocks' scene when timer is not running - DEBUG VERSION."""
+        if not self.obs:
+            return
+        
+        
+        if self.timer_running:
+            return
+        
+        try:
+            response = self.obs.call(requests.GetCurrentProgramScene())
+            current_scene = response.datain.get('currentProgramSceneName', '')
+            
+            if current_scene != "Blocks":
+                self.obs.call(requests.SetCurrentProgramScene(sceneName="Blocks"))
+            else:
+                pass
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+
+    def _handle_timer_state_change(self, new_running_state: bool):
+        """Handle timer state changes and OBS scene unlocking."""
+        if not self.obs:
+            return
+            
+        # If timer just started running
+        if new_running_state and not self.timer_running:
+            # Don't force any scene change - just unlock
+            pass
+            
+        # If timer just stopped
+        elif not new_running_state and self.timer_running:
+            try:
+                self.obs.call(requests.SetCurrentProgramScene(scene_name="Blocks"))
+            except Exception as e:
+                pass
+
+
     
     # CTS Gen7 Reader Methods
     def _read_event_file(self, event_id: str) -> List[str]:
@@ -3425,49 +5687,6 @@ window.addEventListener('beforeunload', () => {
         if self.running:
             self.data_queue.put(data)
 
-        if self.WORDPRESS_ENABLED:
-            self._send_to_wordpress(data)
-
-    def _send_to_wordpress(self, data: Dict) -> None:
-        """Send data to WordPress endpoint (non-blocking)."""
-        try:
-            # Send in a separate thread so it doesn't slow down WebSocket
-            threading.Thread(
-                target=self._wordpress_post_thread,
-                args=(data,),
-                daemon=True
-            ).start()
-        except Exception as e:
-            # Don't let WordPress errors break WebSocket functionality
-            print(f"[WP] Error queuing WordPress post: {e}")
-
-    def _wordpress_post_thread(self, data: Dict) -> None:
-        """Thread worker to POST data to WordPress."""
-        try:
-            response = requests.post(
-                self.WORDPRESS_URL,
-                json=data,
-                timeout=2  # 2 second timeout so it doesn't hang
-            )
-            
-            if response.status_code == 200:
-                # Only log on first successful post, then stay quiet
-                if not hasattr(self, '_wp_connected'):
-                    print(f"[WP] Connected to WordPress successfully")
-                    self._wp_connected = True
-            else:
-                print(f"[WP] WordPress returned status {response.status_code}")
-                
-        except requests.exceptions.Timeout:
-            # Timeout is fine, just skip this update
-            pass
-        except requests.exceptions.ConnectionError:
-            if not hasattr(self, '_wp_connection_warned'):
-                print(f"[WP] Cannot reach WordPress - check URL or internet connection")
-                self._wp_connection_warned = True
-        except Exception as e:
-            print(f"[WP] WordPress error: {e}")
-    
     def _handle_event_change(self, event: str, heat: str) -> None:
         """Handle event/heat changes."""
         data_to_send = {}
@@ -3475,6 +5694,7 @@ window.addEventListener('beforeunload', () => {
             event_name = self._get_event_name(event)
             self.last_event_name = event_name
             data_to_send["eventName"] = event_name.upper()
+            data_to_send["eventID"] = event
             display_heat = f"HEAT {heat}" if heat else 'N/A'
             data_to_send["heatName"] = display_heat
             swimmers = self._get_swimmers_for_heat(event, heat)
@@ -3523,6 +5743,7 @@ window.addEventListener('beforeunload', () => {
         
         if is_empty or current_seconds is None or current_seconds <= 0.09:
             if self.timer_running:
+                self._handle_timer_state_change(False)
                 self.timer_running = False
 
                 if not self._saved_sent_for_heat and self._is_race_data_complete():
@@ -3537,6 +5758,7 @@ window.addEventListener('beforeunload', () => {
             compensated_time = current_seconds + self.TIMER_LATENCY_COMPENSATION
             
             if not self.timer_running:
+                self._handle_timer_state_change(True)
                 self.timer_running = True
                 self.timer_start_time = time.time()
                 self.timer_offset = compensated_time
@@ -3712,6 +5934,9 @@ window.addEventListener('beforeunload', () => {
     # COM Port File Receiver Methods
     def _run_com_receiver(self) -> None:
         """Run COM port file receiver in separate thread."""
+        if self.test_mode:
+            print(f"[TEST MODE] COM receiver disabled")
+            return
         print(f"[OK] COM receiver started on {self.receiver_port}")
         
         while self.running:
@@ -3817,6 +6042,7 @@ window.addEventListener('beforeunload', () => {
         try:
             initial_data = {
                 "eventName": (self.last_event_name or 'N/A').upper(),
+                "eventID": (self.last_event or "N/A"),
                 "heatName": f"HEAT {self.last_heat}" if self.last_heat else 'N/A',
                 "lanes": self.last_swimmers if self.last_swimmers else {str(i): {"name": "", "club": ""} for i in range(1, 9)},
                 "timerSync": {
@@ -3945,9 +6171,13 @@ window.addEventListener('beforeunload', () => {
                     self._handle_time_update(initial_race_time)
             
             # Main loop - continuous polling without blocking
+            # Main loop - continuous polling without blocking
             while self.running:
                 # Read CTS data
-                data = self.cts_serial.read(256)
+                if not self.test_mode:
+                    data = self.cts_serial.read(256)
+                else:
+                    data = b''  # Empty data in test mode
                 if data:
                     buffer.extend(data)
                     for byte_val in buffer:
@@ -3967,6 +6197,15 @@ window.addEventListener('beforeunload', () => {
                 self._handle_finish_times()
 
                 self._check_lane_activity()
+
+                # Check OBS scene lock every 100 iterations (~0.1 seconds)
+                if not hasattr(self, '_obs_check_counter'):
+                    self._obs_check_counter = 0
+
+                self._obs_check_counter += 1
+                if self._obs_check_counter >= 100:
+                    self._ensure_obs_scene_lock()
+                    self._obs_check_counter = 0
                 
                 # Very small sleep to prevent CPU spinning while remaining responsive
                 time.sleep(0.001)
@@ -4022,6 +6261,8 @@ class COMPortSelector:
         self.root.resizable(False, False)
         self.root.attributes('-topmost', True)
         self.root.after(100, lambda: self.root.attributes('-topmost', False))
+
+        self.test_mode = False
         
         # Center window
         self.root.update_idletasks()
@@ -4125,6 +6366,20 @@ class COMPortSelector:
                 fg="gray"
             )
             info_label.pack(pady=(0, 20))
+
+            # Test mode checkbox
+            test_frame = tk.Frame(content_frame)
+            test_frame.pack(pady=(0, 10))
+
+            self.test_mode_var = tk.BooleanVar()
+            test_checkbox = tk.Checkbutton(
+                test_frame,
+                text="Test Mode (No COM ports required)",
+                variable=self.test_mode_var,
+                font=("Helvetica", 10),
+                command=self._toggle_test_mode
+            )
+            test_checkbox.pack()
             
             # Buttons
             button_frame = tk.Frame(content_frame)
@@ -4164,6 +6419,10 @@ class COMPortSelector:
             fg="gray"
         )
         footer_label.pack(side=tk.BOTTOM, pady=(10, 0))
+
+    def _toggle_test_mode(self):
+        """Toggle test mode and update GUI state."""
+        self.test_mode = self.test_mode_var.get()
     
     def _get_available_ports(self) -> List[str]:
         """Get list of available COM ports."""
@@ -4178,6 +6437,13 @@ class COMPortSelector:
     
     def _on_start(self):
         """Handle start button click."""
+        if self.test_mode_var.get():
+            self.test_mode = True
+            self.selected_cts_port = None
+            self.selected_receiver_port = None
+            self.root.destroy()
+            return
+        
         self.selected_cts_port = self.cts_port_var.get()
         self.selected_receiver_port = self.receiver_port_var.get()
         
@@ -4190,16 +6456,32 @@ class COMPortSelector:
         
         self.root.destroy()
     
-    def show(self) -> Tuple[Optional[str], Optional[str]]:
-        """Show the dialog and return selected ports."""
+    def show(self) -> Tuple[Optional[str], Optional[str], bool]:
+        """Show the dialog and return selected ports and test mode status."""
         self.root.mainloop()
-        return self.selected_cts_port, self.selected_receiver_port
+        return self.selected_cts_port, self.selected_receiver_port, self.test_mode
 
 
 def main():
     """Main entry point."""
     selector = COMPortSelector()
-    cts_port, receiver_port = selector.show()
+    cts_port, receiver_port, test_mode = selector.show()
+    
+    if test_mode:
+        print("\n[TEST MODE] Starting in test mode - no COM ports required")
+        try:
+            system = SwimLiveSystem(
+                cts_port="TEST",
+                receiver_port="TEST",
+                baud=9600,
+                test_mode=True
+            )
+            system.run()
+        except Exception as e:
+            print(f"\n[ERROR] Error: {e}")
+            import traceback
+            traceback.print_exc()
+        return
     
     if not cts_port or not receiver_port:
         print("[ERROR] COM ports not selected. Exiting.")
@@ -4209,7 +6491,8 @@ def main():
         system = SwimLiveSystem(
             cts_port=cts_port,
             receiver_port=receiver_port,
-            baud=9600
+            baud=9600,
+            test_mode=False
         )
         system.run()
     except serial.SerialException as e:
